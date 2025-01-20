@@ -360,8 +360,8 @@ impl<'a, TX: Number + RealNumber, TY: Number + Ord, X: Array2<TX> + 'a, Y: Array
     }
 }
 
-impl<'a, TX: Number + RealNumber, TY: Number + Ord, X: Array2<TX>, Y: Array1<TY>> PartialEq
-    for SVC<'a, TX, TY, X, Y>
+impl<TX: Number + RealNumber, TY: Number + Ord, X: Array2<TX>, Y: Array1<TY>> PartialEq
+    for SVC<'_, TX, TY, X, Y>
 {
     fn eq(&self, other: &Self) -> bool {
         if (self.b.unwrap().sub(other.b.unwrap())).abs() > TX::epsilon() * TX::two()
@@ -1110,7 +1110,7 @@ mod tests {
         let svc = SVC::fit(&x, &y, &params).unwrap();
 
         // serialization
-        let deserialized_svc: SVC<f64, i32, _, _> =
+        let deserialized_svc: SVC<'_, f64, i32, _, _> =
             serde_json::from_str(&serde_json::to_string(&svc).unwrap()).unwrap();
 
         assert_eq!(svc, deserialized_svc);

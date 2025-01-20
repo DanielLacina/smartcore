@@ -281,8 +281,8 @@ impl<'a, T: Number + FloatNumber + PartialOrd, X: Array2<T>, Y: Array1<T>> SVR<'
     }
 }
 
-impl<'a, T: Number + FloatNumber + PartialOrd, X: Array2<T>, Y: Array1<T>> PartialEq
-    for SVR<'a, T, X, Y>
+impl<T: Number + FloatNumber + PartialOrd, X: Array2<T>, Y: Array1<T>> PartialEq
+    for SVR<'_, T, X, Y>
 {
     fn eq(&self, other: &Self) -> bool {
         if (self.b - other.b).abs() > T::epsilon() * T::two()
@@ -702,7 +702,7 @@ mod tests {
 
         let svr = SVR::fit(&x, &y, &params).unwrap();
 
-        let deserialized_svr: SVR<f64, DenseMatrix<f64>, _> =
+        let deserialized_svr: SVR<'_, f64, DenseMatrix<f64>, _> =
             serde_json::from_str(&serde_json::to_string(&svr).unwrap()).unwrap();
 
         assert_eq!(svr, deserialized_svr);
