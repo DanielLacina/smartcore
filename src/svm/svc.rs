@@ -75,6 +75,7 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt::Debug;
 use std::marker::PhantomData;
+use std::ops::Mul;
 
 use num::Bounded;
 use rand::seq::SliceRandom;
@@ -84,11 +85,106 @@ use serde::{Deserialize, Serialize};
 
 use crate::api::{PredictorBorrow, SupervisedEstimatorBorrow};
 use crate::error::{Failed, FailedError};
-use crate::linalg::basic::arrays::{Array1, Array2, MutArray};
+use crate::linalg::basic::arrays::ArrayView1;
+use crate::linalg::basic::arrays::{Array, Array1, Array2, MutArray};
+use crate::linalg::basic::matrix::DenseMatrix;
 use crate::numbers::basenum::Number;
 use crate::numbers::realnum::RealNumber;
 use crate::rand_custom::get_rng_impl;
 use crate::svm::Kernel;
+
+pub struct MultiClassSVCParameters<'a> {
+    xs_filtered: Vec<DenseMatrix<f64>>,
+    ys_filtered: Vec<Vec<i64>>,
+    svc_params: &'a SVCParameters<f64, i64, DenseMatrix<f64>, Vec<i64>>,
+    classes: Vec<(i64, i64)>,
+}
+
+impl<'a> MultiClassSVCParameters<'a> {
+    pub fn new(
+        x: &DenseMatrix<f64>,
+        y: &Vec<i64>,
+        params: &'a SVCParameters<f64, i64, DenseMatrix<f64>, Vec<i64>>,
+    ) -> Self {
+        let y = y.unique();
+        let mut classes = Vec::new();
+        let mut xs_filtered = Vec::new();
+        let mut ys_filtered = Vec::new();
+        for i in 0..y.len() {
+            for j in (i + 1)..y.len() {
+                let class1 = y[i];
+                let class2 = y[j];
+                let mut y_filtered = Vec::new();
+                let mut x_filtered = Vec::new();
+                for k in 0..y.len() {
+                    let y_val = y[k];
+                    let x_val = x.get_row(k).iterator(1).map(|v| *v).collect();
+                    if y_val == class1 {
+                        y_filtered.push(1);
+                        x_filtered.push(x_val);
+                    } else if y_val == class2 {
+                        y_filtered.push(-1);
+                        x_filtered.push(x_val);
+                    }
+                }
+                let x_filtered = DenseMatrix::from_2d_vec(&x_filtered).unwrap();
+                xs_filtered.push(x_filtered);
+                ys_filtered.push(y_filtered);
+                classes.push((class1, class2));
+            }
+        }
+        Self {
+            xs_filtered,
+            ys_filtered,
+            svc_params: &params,
+            classes,
+        }
+    }
+}
+pub struct MulticlassSVC<'a> {
+    parameters: &'a MultiClassSVCParameters<'a>,
+    classifiers: Vec<SVC<'a, f64, i64, DenseMatrix<f64>, Vec<i64>>>,
+}
+
+impl<'a> MulticlassSVC<'a> {
+    pub fn fit(params: &'a MultiClassSVCParameters) -> Result<Self, Failed> {
+        let mut classifiers = Vec::new();
+        for i in 0..params.classes.len() {
+            let y_filtered = params.ys_filtered.get(i).unwrap();
+            let x_filtered = params.xs_filtered.get(i).unwrap();
+            let svc = SVC::fit(x_filtered, y_filtered, params.svc_params);
+        }
+        Ok(Self {
+            parameters: &params,
+            classifiers,
+        })
+    }
+
+    pub fn predict(&self, x: &DenseMatrix<f64>) -> Vec<i64> {
+        let mut polls = vec![HashMap::new(); x.shape().0];
+        for i in 0..self.parameters.classes.len() {
+            let svc = self.classifiers.get(i).unwrap();
+            let (class1, class2) = self.parameters.classes[i];
+            let predictions = svc.predict(x).unwrap();
+            for (j, prediction) in predictions.iter().enumerate() {
+                let poll = polls.get_mut(j).unwrap();
+                let class = match prediction {
+                    1.0 => class1,
+                    _ => class2,
+                };
+                if let Some(count) = poll.get_mut(&class) {
+                    *count += 1
+                } else {
+                    poll.insert(class, 1);
+                }
+            }
+        }
+        polls
+            .iter()
+            .map(|v| *v.iter().max_by_key(|(_, count)| **count).unwrap().0)
+            .collect()
+    }
+}
 
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[derive(Debug)]
