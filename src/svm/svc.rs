@@ -59,7 +59,7 @@
 //!
 //! let knl = Kernels::linear();
 //! let parameters = &SVCParameters::default().with_c(200.0).with_kernel(knl);
-//! let svc = SVC::fit(&x, &y, parameters, None).unwrap();
+//! let svc = SVC::fit(&x, &y, parameters).unwrap();
 //!
 //! let y_hat = svc.predict(&x).unwrap();
 //!
@@ -97,7 +97,7 @@ use crate::svm::Kernel;
 /// This struct holds the indices of the data points relevant to a specific binary
 /// classification problem within a multi-class context, and the two classes
 /// being discriminated.
-pub struct MultiClassConfig<TY: Number + Ord> {
+struct MultiClassConfig<TY: Number + Ord> {
     /// The indices of the data points from the original dataset that belong to the two `classes`.
     indices: Vec<usize>,
     /// A tuple representing the two classes that this configuration is designed to distinguish.
@@ -220,7 +220,7 @@ impl<'a, TX: Number + RealNumber, TY: Number + Ord, X: Array2<TX>, Y: Array1<TY>
                 let classes = (class0, class1);
                 let multiclass_config = MultiClassConfig { classes, indices };
                 // Fit a binary SVC for the current pair of classes
-                let svc = SVC::fit(x, y, parameters, Some(multiclass_config)).unwrap();
+                let svc = SVC::multiclass_fit(x, y, parameters, multiclass_config).unwrap();
                 classifiers.push(svc);
             }
         }
@@ -413,7 +413,7 @@ impl<'a, TX: Number + RealNumber, TY: Number + Ord, X: Array2<TX>, Y: Array1<TY>
         y: &'a Y,
         parameters: &'a SVCParameters<TX, TY, X, Y>,
     ) -> Result<Self, Failed> {
-        SVC::fit(x, y, parameters, None)
+        SVC::fit(x, y, parameters)
     }
 }
 
@@ -428,18 +428,109 @@ impl<'a, TX: Number + RealNumber, TY: Number + Ord, X: Array2<TX>, Y: Array1<TY>
 impl<'a, TX: Number + RealNumber, TY: Number + Ord, X: Array2<TX> + 'a, Y: Array1<TY> + 'a>
     SVC<'a, TX, TY, X, Y>
 {
-    /// Fits SVC to your data.
-    /// * `x` - _NxM_ matrix with _N_ observations and _M_ features in each observation.
-    /// * `y` - class labels
-    /// * `parameters` - optional parameters, use `Default::default()` to set parameters to default values.
+    /// Fits a binary Support Vector Classifier (SVC) specifically for multi-class scenarios.
+    ///
+    /// This function is intended to be called by a multi-class strategy (e.g., one-vs-one)
+    /// to train individual binary SVCs. It takes a `MultiClassConfig` which specifies
+    /// the two classes this SVC should discriminate and the subset of data indices
+    /// relevant to these classes. It then delegates the actual optimization and fitting
+    /// to `optimize_and_fit`.
+    ///
+    /// # Arguments
+    /// * `x` - A reference to the input features (2D array) of the training data.
+    /// * `y` - A reference to the target labels (1D array) of the training data.
+    /// * `parameters` - A reference to the `SVCParameters` controlling the training process
+    ///                  (e.g., kernel, C-value, tolerance).
+    /// * `multiclass_config` - A `MultiClassConfig` struct containing:
+    ///     - `classes`: A tuple `(class0, class1)` specifying the two classes this SVC
+    ///                  should distinguish.
+    ///     - `indices`: A `Vec<usize>` containing the indices of the data points in `x` and `y`
+    ///                  that belong to either `class0` or `class1`.
+    ///
+    /// # Returns
+    /// A `Result` which is:
+    /// - `Ok(SVC<'a, TX, TY, X, Y>)`: A new, fitted binary SVC instance.
+    /// - `Err(Failed)`: If the fitting process encounters an error (e.g., invalid parameters).
+    fn multiclass_fit(
+        x: &'a X,
+        y: &'a Y,
+        parameters: &'a SVCParameters<TX, TY, X, Y>,
+        multiclass_config: MultiClassConfig<TY>,
+    ) -> Result<SVC<'a, TX, TY, X, Y>, Failed> {
+        let classes = multiclass_config.classes;
+        let indices = multiclass_config.indices;
+        let svc = Self::optimize_and_fit(x, y, parameters, classes, Some(indices));
+        svc
+    }
+
+    /// Fits a binary Support Vector Classifier (SVC) to the provided data.
+    ///
+    /// This is the primary `fit` method for a standalone binary SVC. It expects
+    /// the target labels `y` to contain exactly two unique classes. If more or
+    /// fewer than two classes are found, it returns an error. It then extracts
+    /// these two classes and proceeds to optimize and fit the SVC model.
+    ///
+    /// # Arguments
+    /// * `x` - A reference to the input features (2D array) of the training data.
+    /// * `y` - A reference to the target labels (1D array) of the training data.
+    ///         `y` must contain exactly two unique class labels.
+    /// * `parameters` - A reference to the `SVCParameters` controlling the training process.
+    ///
+    /// # Returns
+    /// A `Result` which is:
+    /// - `Ok(SVC<'a, TX, TY, X, Y>)`: A new, fitted binary SVC instance.
+    /// - `Err(Failed)`: If the number of unique classes in `y` is not exactly two,
+    ///                  or if the underlying optimization fails.
     pub fn fit(
         x: &'a X,
         y: &'a Y,
         parameters: &'a SVCParameters<TX, TY, X, Y>,
-        multiclass_config: Option<MultiClassConfig<TY>>,
     ) -> Result<SVC<'a, TX, TY, X, Y>, Failed> {
-        let (n, _) = x.shape();
+        let classes = y.unique();
+        // Validate that there are exactly two unique classes in the target labels.
+        if classes.len() != 2 {
+            return Err(Failed::fit(&format!(
+                "Incorrect number of classes: {}. A binary SVC requires exactly two classes.",
+                classes.len()
+            )));
+        }
+        let classes = (classes[0], classes[1]);
+        let svc = Self::optimize_and_fit(x, y, parameters, classes, None);
+        svc
+    }
 
+    /// Internal function to optimize and fit the Support Vector Classifier.
+    ///
+    /// This is the core logic for training a binary SVC. It performs several checks
+    /// (e.g., kernel presence, data shape consistency) and then initializes an
+    /// `Optimizer` to find the support vectors, weights (`w`), and bias (`b`).
+    ///
+    /// # Arguments
+    /// * `x` - A reference to the input features (2D array) of the training data.
+    /// * `y` - A reference to the target labels (1D array) of the training data.
+    /// * `parameters` - A reference to the `SVCParameters` defining the SVM model's configuration.
+    /// * `classes` - A tuple `(class0, class1)` representing the two distinct class labels
+    ///               that the SVC will learn to separate.
+    /// * `indices` - An `Option<Vec<usize>>`. If `Some`, it contains the specific indices
+    ///               of data points from `x` and `y` that should be used for training this
+    ///               binary classifier. If `None`, all data points in `x` and `y` are considered.
+    ///
+    /// # Returns
+    /// A `Result` which is:
+    /// - `Ok(SVC<'a, TX, TY, X, Y>)`: A new `SVC` instance populated with the learned model
+    ///    components (support vectors, weights, bias).
+    /// - `Err(Failed)`: If any of the validation checks fail (e.g., missing kernel,
+    ///    mismatched data shapes), or if the optimization process fails.
+    fn optimize_and_fit(
+        x: &'a X,
+        y: &'a Y,
+        parameters: &'a SVCParameters<TX, TY, X, Y>,
+        classes: (TY, TY),
+        indices: Option<Vec<usize>>,
+    ) -> Result<SVC<'a, TX, TY, X, Y>, Failed> {
+        let (n_samples, _) = x.shape();
+
+        // Validate that a kernel has been defined in the parameters.
         if parameters.kernel.is_none() {
             return Err(Failed::because(
                 FailedError::ParametersError,
@@ -447,41 +538,30 @@ impl<'a, TX: Number + RealNumber, TY: Number + Ord, X: Array2<TX> + 'a, Y: Array
             ));
         }
 
-        if n != y.shape() {
+        // Validate that the number of samples in X matches the number of labels in Y.
+        if n_samples != y.shape() {
             return Err(Failed::fit(
-                "Number of rows of X doesn\'t match number of rows of Y",
+                "Number of rows of X doesn't match number of rows of Y",
             ));
         }
-
-        let (indices, classes) = if let Some(multiclass_config) = multiclass_config {
-            let classes = multiclass_config.classes;
-            (Some(multiclass_config.indices), classes)
-        } else {
-            let classes = y.unique();
-            if classes.len() != 2 {
-                return Err(Failed::fit(&format!(
-                    "Incorrect number of classes: {}",
-                    classes.len()
-                )));
-            }
-            (None, (classes[0], classes[1]))
-        };
 
         let optimizer: Optimizer<'_, TX, TY, X, Y> =
             Optimizer::new(x, y, indices, parameters, &classes);
 
-        let (support_vectors, weight, b) = optimizer.optimize();
+        // Perform the optimization to find the support vectors, weight vector, and bias.
+        // This is where the core SVM algorithm (e.g., SMO) would run.
+        let (support_vectors, weight, b) = optimizer.optimize(); 
 
+        // Construct and return the fitted SVC model.
         Ok(SVC::<'a> {
-            classes: Some(classes),
-            instances: Some(support_vectors),
-            parameters: Some(parameters),
-            w: Some(weight),
-            b: Some(b),
-            phantomdata: PhantomData,
+            classes: Some(classes), // Store the two classes the SVC was trained on.
+            instances: Some(support_vectors), // Store the data points that are support vectors.
+            parameters: Some(parameters), // Reference to the parameters used for fitting.
+            w: Some(weight),        // The learned weight vector (for linear kernels).
+            b: Some(b),             // The learned bias term.
+            phantomdata: PhantomData, // Placeholder for type parameters not directly stored.
         })
     }
-
     /// Predicts estimated class labels from `x`
     /// * `x` - _KxM_ data where _K_ is number of observations and _M_ is number of features.
     pub fn predict(&self, x: &'a X) -> Result<Vec<TX>, Failed> {
@@ -1216,7 +1296,7 @@ mod tests {
             .with_kernel(knl)
             .with_seed(Some(100));
 
-        let y_hat = SVC::fit(&x, &y, &parameters, None)
+        let y_hat = SVC::fit(&x, &y, &parameters)
             .and_then(|lr| lr.predict(&x))
             .unwrap();
         let acc = accuracy(&y, &(y_hat.iter().map(|e| e.to_i32().unwrap()).collect()));
@@ -1251,7 +1331,6 @@ mod tests {
             &SVCParameters::default()
                 .with_c(200.0)
                 .with_kernel(Kernels::linear()),
-            None,
         )
         .and_then(|lr| lr.decision_function(&x2))
         .unwrap();
@@ -1308,7 +1387,6 @@ mod tests {
             &SVCParameters::default()
                 .with_c(1.0)
                 .with_kernel(Kernels::rbf().with_gamma(0.7)),
-            None,
         )
         .and_then(|lr| lr.predict(&x))
         .unwrap();
