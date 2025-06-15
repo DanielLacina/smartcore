@@ -426,38 +426,6 @@ impl<'a, TX: Number + RealNumber, TY: Number + Ord, X: Array2<TX>, Y: Array1<TY>
 impl<'a, TX: Number + RealNumber, TY: Number + Ord, X: Array2<TX> + 'a, Y: Array1<TY> + 'a>
     SVC<'a, TX, TY, X, Y>
 {
-    /// Fits a binary Support Vector Classifier (SVC) specifically for multi-class scenarios.
-    ///
-    /// This function is intended to be called by a multi-class strategy (e.g., one-vs-one)
-    /// to train individual binary SVCs. It takes a `MultiClassConfig` which specifies
-    /// the two classes this SVC should discriminate and the subset of data indices
-    /// relevant to these classes. It then delegates the actual optimization and fitting
-    /// to `optimize_and_fit`.
-    ///
-    /// # Arguments
-    /// * `x` - A reference to the input features (2D array) of the training data.
-    /// * `y` - A reference to the target labels (1D array) of the training data.
-    /// * `parameters` - A reference to the `SVCParameters` controlling the training process (e.g., kernel, C-value, tolerance).
-    /// * `multiclass_config` - A `MultiClassConfig` struct containing:
-    ///     - `classes`: A tuple `(class0, class1)` specifying the two classes this SVC should distinguish.
-    ///     - `indices`: A `Vec<usize>` containing the indices of the data points in `x` and `y that belong to either `class0` or `class1`.`
-    ///
-    /// # Returns
-    /// A `Result` which is:
-    /// - `Ok(SVC<'a, TX, TY, X, Y>)`: A new, fitted binary SVC instance.
-    /// - `Err(Failed)`: If the fitting process encounters an error (e.g., invalid parameters).
-    fn multiclass_fit(
-        x: &'a X,
-        y: &'a Y,
-        parameters: &'a SVCParameters<TX, TY, X, Y>,
-        multiclass_config: MultiClassConfig<TY>,
-    ) -> Result<SVC<'a, TX, TY, X, Y>, Failed> {
-        let classes = multiclass_config.classes;
-        let indices = multiclass_config.indices;
-        let svc = Self::optimize_and_fit(x, y, parameters, classes, Some(indices));
-        svc
-    }
-
     /// Fits a binary Support Vector Classifier (SVC) to the provided data.
     ///
     /// This is the primary `fit` method for a standalone binary SVC. It expects
@@ -489,6 +457,38 @@ impl<'a, TX: Number + RealNumber, TY: Number + Ord, X: Array2<TX> + 'a, Y: Array
         }
         let classes = (classes[0], classes[1]);
         let svc = Self::optimize_and_fit(x, y, parameters, classes, None);
+        svc
+    }
+
+    /// Fits a binary Support Vector Classifier (SVC) specifically for multi-class scenarios.
+    ///
+    /// This function is intended to be called by a multi-class strategy (e.g., one-vs-one)
+    /// to train individual binary SVCs. It takes a `MultiClassConfig` which specifies
+    /// the two classes this SVC should discriminate and the subset of data indices
+    /// relevant to these classes. It then delegates the actual optimization and fitting
+    /// to `optimize_and_fit`.
+    ///
+    /// # Arguments
+    /// * `x` - A reference to the input features (2D array) of the training data.
+    /// * `y` - A reference to the target labels (1D array) of the training data.
+    /// * `parameters` - A reference to the `SVCParameters` controlling the training process (e.g., kernel, C-value, tolerance).
+    /// * `multiclass_config` - A `MultiClassConfig` struct containing:
+    ///     - `classes`: A tuple `(class0, class1)` specifying the two classes this SVC should distinguish.
+    ///     - `indices`: A `Vec<usize>` containing the indices of the data points in `x` and `y that belong to either `class0` or `class1`.`
+    ///
+    /// # Returns
+    /// A `Result` which is:
+    /// - `Ok(SVC<'a, TX, TY, X, Y>)`: A new, fitted binary SVC instance.
+    /// - `Err(Failed)`: If the fitting process encounters an error (e.g., invalid parameters).
+    fn multiclass_fit(
+        x: &'a X,
+        y: &'a Y,
+        parameters: &'a SVCParameters<TX, TY, X, Y>,
+        multiclass_config: MultiClassConfig<TY>,
+    ) -> Result<SVC<'a, TX, TY, X, Y>, Failed> {
+        let classes = multiclass_config.classes;
+        let indices = multiclass_config.indices;
+        let svc = Self::optimize_and_fit(x, y, parameters, classes, Some(indices));
         svc
     }
 
@@ -1199,55 +1199,6 @@ mod tests {
         wasm_bindgen_test::wasm_bindgen_test
     )]
     #[test]
-    fn svc_multiclass_fit_predict() {
-        let x = DenseMatrix::from_2d_array(&[
-            &[5.1, 3.5, 1.4, 0.2],
-            &[4.9, 3.0, 1.4, 0.2],
-            &[4.7, 3.2, 1.3, 0.2],
-            &[4.6, 3.1, 1.5, 0.2],
-            &[5.0, 3.6, 1.4, 0.2],
-            &[5.4, 3.9, 1.7, 0.4],
-            &[4.6, 3.4, 1.4, 0.3],
-            &[5.0, 3.4, 1.5, 0.2],
-            &[4.4, 2.9, 1.4, 0.2],
-            &[4.9, 3.1, 1.5, 0.1],
-            &[7.0, 3.2, 4.7, 1.4],
-            &[6.4, 3.2, 4.5, 1.5],
-            &[6.9, 3.1, 4.9, 1.5],
-            &[5.5, 2.3, 4.0, 1.3],
-            &[6.5, 2.8, 4.6, 1.5],
-            &[5.7, 2.8, 4.5, 1.3],
-            &[6.3, 3.3, 4.7, 1.6],
-            &[4.9, 2.4, 3.3, 1.0],
-            &[6.6, 2.9, 4.6, 1.3],
-            &[5.2, 2.7, 3.9, 1.4],
-        ])
-        .unwrap();
-
-        let y: Vec<i32> = vec![0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 2, 2, 2, 2, 2, 2, 2];
-
-        let knl = Kernels::linear();
-        let parameters = SVCParameters::default()
-            .with_c(200.0)
-            .with_kernel(knl)
-            .with_seed(Some(100));
-
-        let y_hat = MultiClassSVC::fit(&x, &y, &parameters)
-            .and_then(|lr| lr.predict(&x))
-            .unwrap();
-
-        let acc = accuracy(&y, &(y_hat.iter().map(|e| e.to_i32().unwrap()).collect()));
-
-        assert!(
-            acc >= 0.9,
-            "Multiclass accuracy ({acc}) is not larger or equal to 0.9"
-        );
-    }
-    #[cfg_attr(
-        all(target_arch = "wasm32", not(target_os = "wasi")),
-        wasm_bindgen_test::wasm_bindgen_test
-    )]
-    #[test]
     fn svc_fit_predict() {
         let x = DenseMatrix::from_2d_array(&[
             &[5.1, 3.5, 1.4, 0.2],
@@ -1381,6 +1332,56 @@ mod tests {
         let acc = accuracy(&y, &(y_hat.iter().map(|e| e.to_i32().unwrap()).collect()));
 
         assert!(acc >= 0.9, "accuracy ({acc}) is not larger or equal to 0.9");
+    }
+
+    #[cfg_attr(
+        all(target_arch = "wasm32", not(target_os = "wasi")),
+        wasm_bindgen_test::wasm_bindgen_test
+    )]
+    #[test]
+    fn svc_multiclass_fit_predict() {
+        let x = DenseMatrix::from_2d_array(&[
+            &[5.1, 3.5, 1.4, 0.2],
+            &[4.9, 3.0, 1.4, 0.2],
+            &[4.7, 3.2, 1.3, 0.2],
+            &[4.6, 3.1, 1.5, 0.2],
+            &[5.0, 3.6, 1.4, 0.2],
+            &[5.4, 3.9, 1.7, 0.4],
+            &[4.6, 3.4, 1.4, 0.3],
+            &[5.0, 3.4, 1.5, 0.2],
+            &[4.4, 2.9, 1.4, 0.2],
+            &[4.9, 3.1, 1.5, 0.1],
+            &[7.0, 3.2, 4.7, 1.4],
+            &[6.4, 3.2, 4.5, 1.5],
+            &[6.9, 3.1, 4.9, 1.5],
+            &[5.5, 2.3, 4.0, 1.3],
+            &[6.5, 2.8, 4.6, 1.5],
+            &[5.7, 2.8, 4.5, 1.3],
+            &[6.3, 3.3, 4.7, 1.6],
+            &[4.9, 2.4, 3.3, 1.0],
+            &[6.6, 2.9, 4.6, 1.3],
+            &[5.2, 2.7, 3.9, 1.4],
+        ])
+        .unwrap();
+
+        let y: Vec<i32> = vec![0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 2, 2, 2, 2, 2, 2, 2];
+
+        let knl = Kernels::linear();
+        let parameters = SVCParameters::default()
+            .with_c(200.0)
+            .with_kernel(knl)
+            .with_seed(Some(100));
+
+        let y_hat = MultiClassSVC::fit(&x, &y, &parameters)
+            .and_then(|lr| lr.predict(&x))
+            .unwrap();
+
+        let acc = accuracy(&y, &(y_hat.iter().map(|e| e.to_i32().unwrap()).collect()));
+
+        assert!(
+            acc >= 0.9,
+            "Multiclass accuracy ({acc}) is not larger or equal to 0.9"
+        );
     }
 
     #[cfg_attr(
