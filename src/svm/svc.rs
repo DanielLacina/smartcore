@@ -58,10 +58,11 @@
 //!            1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1];
 //!
 //! let knl = Kernels::linear();
-//! let params = &SVCParameters::default().with_c(200.0).with_kernel(knl);
-//! let svc = SVC::fit(&x, &y, params).unwrap();
+//! let parameters = &SVCParameters::default().with_c(200.0).with_kernel(knl);
+//! let svc = SVC::fit(&x, &y, parameters, None).unwrap();
 //!
 //! let y_hat = svc.predict(&x).unwrap();
+//!
 //! ```
 //!
 //! ## References:
@@ -84,11 +85,195 @@ use serde::{Deserialize, Serialize};
 
 use crate::api::{PredictorBorrow, SupervisedEstimatorBorrow};
 use crate::error::{Failed, FailedError};
-use crate::linalg::basic::arrays::{Array1, Array2, MutArray};
+use crate::linalg::basic::arrays::{Array, Array1, Array2, MutArray};
 use crate::numbers::basenum::Number;
 use crate::numbers::realnum::RealNumber;
 use crate::rand_custom::get_rng_impl;
 use crate::svm::Kernel;
+
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[derive(Debug)]
+/// Configuration for a multi-class Support Vector Machine (SVM) classifier.
+/// This struct holds the indices of the data points relevant to a specific binary
+/// classification problem within a multi-class context, and the two classes
+/// being discriminated.
+pub struct MultiClassConfig<TY: Number + Ord> {
+    /// The indices of the data points from the original dataset that belong to the two `classes`.
+    indices: Vec<usize>,
+    /// A tuple representing the two classes that this configuration is designed to distinguish.
+    classes: (TY, TY),
+}
+
+impl<'a, TX: Number + RealNumber, TY: Number + Ord, X: Array2<TX>, Y: Array1<TY>>
+    SupervisedEstimatorBorrow<'a, X, Y, SVCParameters<TX, TY, X, Y>>
+    for MultiClassSVC<'a, TX, TY, X, Y>
+{
+    /// Creates a new, empty `MultiClassSVC` instance.
+    fn new() -> Self {
+        Self {
+            classifiers: Option::None,
+        }
+    }
+
+    /// Fits the `MultiClassSVC` model to the provided data and parameters.
+    ///
+    /// This method delegates the fitting process to the inherent `MultiClassSVC::fit` method.
+    ///
+    /// # Arguments
+    /// * `x` - A reference to the input features (2D array).
+    /// * `y` - A reference to the target labels (1D array).
+    /// * `parameters` - A reference to the `SVCParameters` controlling the SVM training.
+    ///
+    /// # Returns
+    /// A `Result` indicating success (`Self`) or failure (`Failed`).
+    fn fit(
+        x: &'a X,
+        y: &'a Y,
+        parameters: &'a SVCParameters<TX, TY, X, Y>,
+    ) -> Result<Self, Failed> {
+        MultiClassSVC::fit(x, y, parameters)
+    }
+}
+
+impl<'a, TX: Number + RealNumber, TY: Number + Ord, X: Array2<TX>, Y: Array1<TY>>
+    PredictorBorrow<'a, X, TX> for MultiClassSVC<'a, TX, TY, X, Y>
+{
+    /// Predicts the class labels for new data points.
+    ///
+    /// This method delegates the prediction process to the inherent `MultiClassSVC::predict` method.
+    /// It unwraps the inner `Result` from `MultiClassSVC::predict`, assuming that
+    /// the prediction will always succeed after a successful fit.
+    ///
+    /// # Arguments
+    /// * `x` - A reference to the input features (2D array) for which to make predictions.
+    ///
+    /// # Returns
+    /// A `Result` containing a `Vec` of predicted class labels (`TX`) or a `Failed` error.
+    fn predict(&self, x: &'a X) -> Result<Vec<TX>, Failed> {
+        Ok(self.predict(x).unwrap())
+    }
+}
+
+/// A multi-class Support Vector Machine (SVM) classifier.
+///
+/// This struct implements a multi-class SVM using the "one-vs-one" strategy,
+/// where a separate binary SVC classifier is trained for every pair of classes.
+///
+/// # Type Parameters
+/// * `'a` - Lifetime parameter for borrowed data.
+/// * `TX` - The numeric type of the input features (must implement `Number` and `RealNumber`).
+/// * `TY` - The numeric type of the target labels (must implement `Number` and `Ord`).
+/// * `X` - The type representing the 2D array of input features (e.g., a matrix).
+/// * `Y` - The type representing the 1D array of target labels (e.g., a vector).
+pub struct MultiClassSVC<
+    'a,
+    TX: Number + RealNumber,
+    TY: Number + Ord,
+    X: Array2<TX>,
+    Y: Array1<TY>,
+> {
+    /// An optional vector of binary `SVC` classifiers.
+    classifiers: Option<Vec<SVC<'a, TX, TY, X, Y>>>,
+}
+
+impl<'a, TX: Number + RealNumber, TY: Number + Ord, X: Array2<TX>, Y: Array1<TY>>
+    MultiClassSVC<'a, TX, TY, X, Y>
+{
+    /// Fits the `MultiClassSVC` model to the provided data using a one-vs-one strategy.
+    ///
+    /// This method identifies all unique classes in the target labels `y` and then
+    /// trains a binary `SVC` for every unique pair of classes. For each pair, it
+    /// extracts the relevant data points and their labels, and then trains a
+    /// specialized `SVC` for that binary classification task.
+    ///
+    /// # Arguments
+    /// * `x` - A reference to the input features (2D array).
+    /// * `y` - A reference to the target labels (1D array).
+    /// * `parameters` - A reference to the `SVCParameters` controlling the SVM training for each individual binary classifier.
+    ///  
+    ///
+    /// # Returns
+    /// A `Result` indicating success (`MultiClassSVC`) or failure (`Failed`).
+    pub fn fit(
+        x: &'a X,
+        y: &'a Y,
+        parameters: &'a SVCParameters<TX, TY, X, Y>,
+    ) -> Result<MultiClassSVC<'a, TX, TY, X, Y>, Failed> {
+        let unique_classes = y.unique();
+        let mut classifiers = Vec::new();
+        // Iterate through all unique pairs of classes (one-vs-one strategy)
+        for i in 0..unique_classes.len() {
+            for j in i..unique_classes.len() {
+                if i == j {
+                    continue;
+                }
+                let class0 = unique_classes[j];
+                let class1 = unique_classes[i];
+
+                let mut indices = Vec::new();
+                // Collect indices of data points belonging to the current pair of classes
+                for (index, v) in y.iterator(0).enumerate() {
+                    if *v == class0 || *v == class1 {
+                        indices.push(index)
+                    }
+                }
+                let classes = (class0, class1);
+                let multiclass_config = MultiClassConfig { classes, indices };
+                // Fit a binary SVC for the current pair of classes
+                let svc = SVC::fit(x, y, parameters, Some(multiclass_config)).unwrap();
+                classifiers.push(svc);
+            }
+        }
+        Ok(Self {
+            classifiers: Some(classifiers),
+        })
+    }
+
+    /// Predicts the class labels for new data points using the trained multi-class SVM.
+    ///
+    /// This method uses a "voting" scheme (majority vote) among all the binary
+    /// classifiers to determine the final prediction for each data point.
+    ///
+    /// # Arguments
+    /// * `x` - A reference to the input features (2D array) for which to make predictions.
+    ///
+    /// # Returns
+    /// A `Result` containing a `Vec` of predicted class labels (`TX`) or a `Failed` error.
+    ///
+    pub fn predict(&self, x: &X) -> Result<Vec<TX>, Failed> {
+        // Initialize a HashMap for each data point to store votes for each class
+        let mut polls = vec![HashMap::new(); x.shape().0];
+        // Retrieve the trained binary classifiers
+        let classifiers = self.classifiers.as_ref().unwrap();
+
+        // Iterate through each binary classifier
+        for i in 0..classifiers.len() {
+            let svc = classifiers.get(i).unwrap();
+            let predictions = svc.predict(x).unwrap(); // call SVC::predict for each binary classifier
+
+            // For each prediction from the current binary classifier
+            for (j, prediction) in predictions.iter().enumerate() {
+                let prediction = prediction.to_i32().unwrap();
+                let poll = polls.get_mut(j).unwrap(); // Get the poll for the current data point
+                                                      // Increment the vote for the predicted class
+                if let Some(count) = poll.get_mut(&prediction) {
+                    *count += 1
+                } else {
+                    poll.insert(prediction, 1);
+                }
+            }
+        }
+
+        // Determine the final prediction for each data point based on majority vote
+        Ok(polls
+            .iter()
+            .map(|v| {
+                // Find the class with the maximum votes for each data point
+                TX::from(*v.iter().max_by_key(|(_, class)| *class).unwrap().0).unwrap()
+            })
+            .collect())
+    }
+}
 
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[derive(Debug)]
@@ -123,7 +308,7 @@ pub struct SVCParameters<TX: Number + RealNumber, TY: Number + Ord, X: Array2<TX
 )]
 /// Support Vector Classifier
 pub struct SVC<'a, TX: Number + RealNumber, TY: Number + Ord, X: Array2<TX>, Y: Array1<TY>> {
-    classes: Option<Vec<TY>>,
+    classes: Option<(TY, TY)>,
     instances: Option<Vec<Vec<TX>>>,
     #[cfg_attr(feature = "serde", serde(skip))]
     parameters: Option<&'a SVCParameters<TX, TY, X, Y>>,
@@ -152,7 +337,9 @@ struct Cache<TX: Number + RealNumber, TY: Number + Ord, X: Array2<TX>, Y: Array1
 struct Optimizer<'a, TX: Number + RealNumber, TY: Number + Ord, X: Array2<TX>, Y: Array1<TY>> {
     x: &'a X,
     y: &'a Y,
+    indices: Option<Vec<usize>>,
     parameters: &'a SVCParameters<TX, TY, X, Y>,
+    classes: &'a (TY, TY),
     svmin: usize,
     svmax: usize,
     gmin: TX,
@@ -180,12 +367,12 @@ impl<TX: Number + RealNumber, TY: Number + Ord, X: Array2<TX>, Y: Array1<TY>>
         self.tol = tol;
         self
     }
+
     /// The kernel function.
     pub fn with_kernel<K: Kernel + 'static>(mut self, kernel: K) -> Self {
         self.kernel = Some(Box::new(kernel));
         self
     }
-
     /// Seed for the pseudo random number generator.
     pub fn with_seed(mut self, seed: Option<u64>) -> Self {
         self.seed = seed;
@@ -226,7 +413,7 @@ impl<'a, TX: Number + RealNumber, TY: Number + Ord, X: Array2<TX>, Y: Array1<TY>
         y: &'a Y,
         parameters: &'a SVCParameters<TX, TY, X, Y>,
     ) -> Result<Self, Failed> {
-        SVC::fit(x, y, parameters)
+        SVC::fit(x, y, parameters, None)
     }
 }
 
@@ -249,6 +436,7 @@ impl<'a, TX: Number + RealNumber, TY: Number + Ord, X: Array2<TX> + 'a, Y: Array
         x: &'a X,
         y: &'a Y,
         parameters: &'a SVCParameters<TX, TY, X, Y>,
+        multiclass_config: Option<MultiClassConfig<TY>>,
     ) -> Result<SVC<'a, TX, TY, X, Y>, Failed> {
         let (n, _) = x.shape();
 
@@ -265,27 +453,22 @@ impl<'a, TX: Number + RealNumber, TY: Number + Ord, X: Array2<TX> + 'a, Y: Array
             ));
         }
 
-        let classes = y.unique();
-
-        if classes.len() != 2 {
-            return Err(Failed::fit(&format!(
-                "Incorrect number of classes: {}",
-                classes.len()
-            )));
-        }
-
-        // Make sure class labels are either 1 or -1
-        for e in y.iterator(0) {
-            let y_v = e.to_i32().unwrap();
-            if y_v != -1 && y_v != 1 {
-                return Err(Failed::because(
-                    FailedError::ParametersError,
-                    "Class labels must be 1 or -1",
-                ));
+        let (indices, classes) = if let Some(multiclass_config) = multiclass_config {
+            let classes = multiclass_config.classes;
+            (Some(multiclass_config.indices), classes)
+        } else {
+            let classes = y.unique();
+            if classes.len() != 2 {
+                return Err(Failed::fit(&format!(
+                    "Incorrect number of classes: {}",
+                    classes.len()
+                )));
             }
-        }
+            (None, (classes[0], classes[1]))
+        };
 
-        let optimizer: Optimizer<'_, TX, TY, X, Y> = Optimizer::new(x, y, parameters);
+        let optimizer: Optimizer<'_, TX, TY, X, Y> =
+            Optimizer::new(x, y, indices, parameters, &classes);
 
         let (support_vectors, weight, b) = optimizer.optimize();
 
@@ -305,9 +488,9 @@ impl<'a, TX: Number + RealNumber, TY: Number + Ord, X: Array2<TX> + 'a, Y: Array
         let mut y_hat: Vec<TX> = self.decision_function(x)?;
 
         for i in 0..y_hat.len() {
-            let cls_idx = match *y_hat.get(i).unwrap() > TX::zero() {
-                false => TX::from(self.classes.as_ref().unwrap()[0]).unwrap(),
-                true => TX::from(self.classes.as_ref().unwrap()[1]).unwrap(),
+            let cls_idx = match *y_hat.get(i) > TX::zero() {
+                false => TX::from(self.classes.as_ref().unwrap().0).unwrap(),
+                true => TX::from(self.classes.as_ref().unwrap().1).unwrap(),
             };
 
             y_hat.set(i, cls_idx);
@@ -445,14 +628,18 @@ impl<'a, TX: Number + RealNumber, TY: Number + Ord, X: Array2<TX>, Y: Array1<TY>
     fn new(
         x: &'a X,
         y: &'a Y,
+        indices: Option<Vec<usize>>,
         parameters: &'a SVCParameters<TX, TY, X, Y>,
+        classes: &'a (TY, TY),
     ) -> Optimizer<'a, TX, TY, X, Y> {
         let (n, _) = x.shape();
 
         Optimizer {
             x,
             y,
+            indices,
             parameters,
+            classes,
             svmin: 0,
             svmax: 0,
             gmin: <TX as Bounded>::max_value(),
@@ -478,7 +665,12 @@ impl<'a, TX: Number + RealNumber, TY: Number + Ord, X: Array2<TX>, Y: Array1<TY>
             for i in self.permutate(n) {
                 x.clear();
                 x.extend(self.x.get_row(i).iterator(0).take(n).copied());
-                self.process(i, &x, *self.y.get(i), &mut cache);
+                let y = if *self.y.get(i) == self.classes.1 {
+                    1
+                } else {
+                    -1
+                } as f64;
+                self.process(i, &x, y, &mut cache);
                 loop {
                     self.reprocess(tol, &mut cache);
                     self.find_min_max_gradient();
@@ -514,14 +706,16 @@ impl<'a, TX: Number + RealNumber, TY: Number + Ord, X: Array2<TX>, Y: Array1<TY>
         for i in self.permutate(n) {
             x.clear();
             x.extend(self.x.get_row(i).iterator(0).take(n).copied());
-            if *self.y.get(i) == TY::one() && cp < few {
-                if self.process(i, &x, *self.y.get(i), cache) {
+            let y = if *self.y.get(i) == self.classes.1 {
+                1
+            } else {
+                -1
+            } as f64;
+            if y == 1.0 && cp < few {
+                if self.process(i, &x, y, cache) {
                     cp += 1;
                 }
-            } else if *self.y.get(i) == TY::from(-1).unwrap()
-                && cn < few
-                && self.process(i, &x, *self.y.get(i), cache)
-            {
+            } else if y == -1.0 && cn < few && self.process(i, &x, y, cache) {
                 cn += 1;
             }
 
@@ -531,14 +725,14 @@ impl<'a, TX: Number + RealNumber, TY: Number + Ord, X: Array2<TX>, Y: Array1<TY>
         }
     }
 
-    fn process(&mut self, i: usize, x: &[TX], y: TY, cache: &mut Cache<TX, TY, X, Y>) -> bool {
+    fn process(&mut self, i: usize, x: &[TX], y: f64, cache: &mut Cache<TX, TY, X, Y>) -> bool {
         for j in 0..self.sv.len() {
             if self.sv[j].index == i {
                 return true;
             }
         }
 
-        let mut g: f64 = y.to_f64().unwrap();
+        let mut g = y;
 
         let mut cache_values: Vec<((usize, usize), TX)> = Vec::new();
 
@@ -559,8 +753,8 @@ impl<'a, TX: Number + RealNumber, TY: Number + Ord, X: Array2<TX>, Y: Array1<TY>
         self.find_min_max_gradient();
 
         if self.gmin < self.gmax
-            && ((y > TY::zero() && g < self.gmin.to_f64().unwrap())
-                || (y < TY::zero() && g > self.gmax.to_f64().unwrap()))
+            && ((y > 0.0 && g < self.gmin.to_f64().unwrap())
+                || (y < 0.0 && g > self.gmax.to_f64().unwrap()))
         {
             return false;
         }
@@ -590,7 +784,7 @@ impl<'a, TX: Number + RealNumber, TY: Number + Ord, X: Array2<TX>, Y: Array1<TY>
             ),
         );
 
-        if y > TY::zero() {
+        if y > 0.0 {
             self.smo(None, Some(0), TX::zero(), cache);
         } else {
             self.smo(Some(0), None, TX::zero(), cache);
@@ -647,7 +841,6 @@ impl<'a, TX: Number + RealNumber, TY: Number + Ord, X: Array2<TX>, Y: Array1<TY>
         let gmin = self.gmin;
 
         let mut idxs_to_drop: HashSet<usize> = HashSet::new();
-
         self.sv.retain(|v| {
             if v.alpha == 0f64
                 && ((TX::from(v.grad).unwrap() >= gmax && TX::zero() >= TX::from(v.cmax).unwrap())
@@ -666,7 +859,11 @@ impl<'a, TX: Number + RealNumber, TY: Number + Ord, X: Array2<TX>, Y: Array1<TY>
 
     fn permutate(&self, n: usize) -> Vec<usize> {
         let mut rng = get_rng_impl(self.parameters.seed);
-        let mut range: Vec<usize> = (0..n).collect();
+        let mut range = if let Some(indices) = self.indices.clone() {
+            indices
+        } else {
+            (0..n).collect::<Vec<usize>>()
+        };
         range.shuffle(&mut rng);
         range
     }
@@ -935,6 +1132,55 @@ mod tests {
         wasm_bindgen_test::wasm_bindgen_test
     )]
     #[test]
+    fn svc_multiclass_fit_predict() {
+        let x = DenseMatrix::from_2d_array(&[
+            &[5.1, 3.5, 1.4, 0.2],
+            &[4.9, 3.0, 1.4, 0.2],
+            &[4.7, 3.2, 1.3, 0.2],
+            &[4.6, 3.1, 1.5, 0.2],
+            &[5.0, 3.6, 1.4, 0.2],
+            &[5.4, 3.9, 1.7, 0.4],
+            &[4.6, 3.4, 1.4, 0.3],
+            &[5.0, 3.4, 1.5, 0.2],
+            &[4.4, 2.9, 1.4, 0.2],
+            &[4.9, 3.1, 1.5, 0.1],
+            &[7.0, 3.2, 4.7, 1.4],
+            &[6.4, 3.2, 4.5, 1.5],
+            &[6.9, 3.1, 4.9, 1.5],
+            &[5.5, 2.3, 4.0, 1.3],
+            &[6.5, 2.8, 4.6, 1.5],
+            &[5.7, 2.8, 4.5, 1.3],
+            &[6.3, 3.3, 4.7, 1.6],
+            &[4.9, 2.4, 3.3, 1.0],
+            &[6.6, 2.9, 4.6, 1.3],
+            &[5.2, 2.7, 3.9, 1.4],
+        ])
+        .unwrap();
+
+        let y: Vec<i32> = vec![0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 2, 2, 2, 2, 2, 2, 2];
+
+        let knl = Kernels::linear();
+        let parameters = SVCParameters::default()
+            .with_c(200.0)
+            .with_kernel(knl)
+            .with_seed(Some(100));
+
+        let y_hat = MultiClassSVC::fit(&x, &y, &parameters)
+            .and_then(|lr| lr.predict(&x))
+            .unwrap();
+
+        let acc = accuracy(&y, &(y_hat.iter().map(|e| e.to_i32().unwrap()).collect()));
+
+        assert!(
+            acc >= 0.9,
+            "Multiclass accuracy ({acc}) is not larger or equal to 0.9"
+        );
+    }
+    #[cfg_attr(
+        all(target_arch = "wasm32", not(target_os = "wasi")),
+        wasm_bindgen_test::wasm_bindgen_test
+    )]
+    #[test]
     fn svc_fit_predict() {
         let x = DenseMatrix::from_2d_array(&[
             &[5.1, 3.5, 1.4, 0.2],
@@ -965,12 +1211,12 @@ mod tests {
         ];
 
         let knl = Kernels::linear();
-        let params = SVCParameters::default()
+        let parameters = SVCParameters::default()
             .with_c(200.0)
             .with_kernel(knl)
             .with_seed(Some(100));
 
-        let y_hat = SVC::fit(&x, &y, &params)
+        let y_hat = SVC::fit(&x, &y, &parameters, None)
             .and_then(|lr| lr.predict(&x))
             .unwrap();
         let acc = accuracy(&y, &(y_hat.iter().map(|e| e.to_i32().unwrap()).collect()));
@@ -1005,6 +1251,7 @@ mod tests {
             &SVCParameters::default()
                 .with_c(200.0)
                 .with_kernel(Kernels::linear()),
+            None,
         )
         .and_then(|lr| lr.decision_function(&x2))
         .unwrap();
@@ -1061,6 +1308,7 @@ mod tests {
             &SVCParameters::default()
                 .with_c(1.0)
                 .with_kernel(Kernels::rbf().with_gamma(0.7)),
+            None,
         )
         .and_then(|lr| lr.predict(&x))
         .unwrap();
@@ -1106,8 +1354,8 @@ mod tests {
         ];
 
         let knl = Kernels::linear();
-        let params = SVCParameters::default().with_kernel(knl);
-        let svc = SVC::fit(&x, &y, &params).unwrap();
+        let parameters = SVCParameters::default().with_kernel(knl);
+        let svc = SVC::fit(&x, &y, &parameters).unwrap();
 
         // serialization
         let deserialized_svc: SVC<'_, f64, i32, _, _> =
