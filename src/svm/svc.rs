@@ -141,8 +141,6 @@ impl<'a, TX: Number + RealNumber, TY: Number + Ord, X: Array2<TX>, Y: Array1<TY>
     /// Predicts the class labels for new data points.
     ///
     /// This method delegates the prediction process to the inherent `MultiClassSVC::predict` method.
-    /// It unwraps the inner `Result` from `MultiClassSVC::predict`, assuming that
-    /// the prediction will always succeed after a successful fit.
     ///
     /// # Arguments
     /// * `x` - A reference to the input features (2D array) for which to make predictions.
@@ -439,13 +437,10 @@ impl<'a, TX: Number + RealNumber, TY: Number + Ord, X: Array2<TX> + 'a, Y: Array
     /// # Arguments
     /// * `x` - A reference to the input features (2D array) of the training data.
     /// * `y` - A reference to the target labels (1D array) of the training data.
-    /// * `parameters` - A reference to the `SVCParameters` controlling the training process
-    ///                  (e.g., kernel, C-value, tolerance).
+    /// * `parameters` - A reference to the `SVCParameters` controlling the training process (e.g., kernel, C-value, tolerance).
     /// * `multiclass_config` - A `MultiClassConfig` struct containing:
-    ///     - `classes`: A tuple `(class0, class1)` specifying the two classes this SVC
-    ///                  should distinguish.
-    ///     - `indices`: A `Vec<usize>` containing the indices of the data points in `x` and `y`
-    ///                  that belong to either `class0` or `class1`.
+    ///     - `classes`: A tuple `(class0, class1)` specifying the two classes this SVC should distinguish.
+    ///     - `indices`: A `Vec<usize>` containing the indices of the data points in `x` and `y that belong to either `class0` or `class1`.`
     ///
     /// # Returns
     /// A `Result` which is:
@@ -472,15 +467,13 @@ impl<'a, TX: Number + RealNumber, TY: Number + Ord, X: Array2<TX> + 'a, Y: Array
     ///
     /// # Arguments
     /// * `x` - A reference to the input features (2D array) of the training data.
-    /// * `y` - A reference to the target labels (1D array) of the training data.
-    ///         `y` must contain exactly two unique class labels.
+    /// * `y` - A reference to the target labels (1D array) of the training data. `y` must contain exactly two unique class labels.
     /// * `parameters` - A reference to the `SVCParameters` controlling the training process.
     ///
     /// # Returns
     /// A `Result` which is:
     /// - `Ok(SVC<'a, TX, TY, X, Y>)`: A new, fitted binary SVC instance.
-    /// - `Err(Failed)`: If the number of unique classes in `y` is not exactly two,
-    ///                  or if the underlying optimization fails.
+    /// - `Err(Failed)`: If the number of unique classes in `y` is not exactly two, or if the underlying optimization fails.
     pub fn fit(
         x: &'a X,
         y: &'a Y,
@@ -509,18 +502,12 @@ impl<'a, TX: Number + RealNumber, TY: Number + Ord, X: Array2<TX> + 'a, Y: Array
     /// * `x` - A reference to the input features (2D array) of the training data.
     /// * `y` - A reference to the target labels (1D array) of the training data.
     /// * `parameters` - A reference to the `SVCParameters` defining the SVM model's configuration.
-    /// * `classes` - A tuple `(class0, class1)` representing the two distinct class labels
-    ///               that the SVC will learn to separate.
-    /// * `indices` - An `Option<Vec<usize>>`. If `Some`, it contains the specific indices
-    ///               of data points from `x` and `y` that should be used for training this
-    ///               binary classifier. If `None`, all data points in `x` and `y` are considered.
-    ///
+    /// * `classes` - A tuple `(class0, class1)` representing the two distinct class labels that the SVC will learn to separate.
+    /// * `indices` - An `Option<Vec<usize>>`. If `Some`, it contains the specific indices of data points from `x` and `y` that should be used for training this binary classifier. If `None`, all data points in `x` and `y` are considered.
     /// # Returns
     /// A `Result` which is:
-    /// - `Ok(SVC<'a, TX, TY, X, Y>)`: A new `SVC` instance populated with the learned model
-    ///    components (support vectors, weights, bias).
-    /// - `Err(Failed)`: If any of the validation checks fail (e.g., missing kernel,
-    ///    mismatched data shapes), or if the optimization process fails.
+    /// - `Ok(SVC<'a, TX, TY, X, Y>)`: A new `SVC` instance populated with the learned model components (support vectors, weights, bias).
+    /// - `Err(Failed)`: If any of the validation checks fail (e.g., missing kernel, mismatched data shapes), or if the optimization process fails.
     fn optimize_and_fit(
         x: &'a X,
         y: &'a Y,
@@ -550,7 +537,7 @@ impl<'a, TX: Number + RealNumber, TY: Number + Ord, X: Array2<TX> + 'a, Y: Array
 
         // Perform the optimization to find the support vectors, weight vector, and bias.
         // This is where the core SVM algorithm (e.g., SMO) would run.
-        let (support_vectors, weight, b) = optimizer.optimize(); 
+        let (support_vectors, weight, b) = optimizer.optimize();
 
         // Construct and return the fitted SVC model.
         Ok(SVC::<'a> {
