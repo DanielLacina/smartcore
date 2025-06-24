@@ -413,6 +413,8 @@ impl<TX: Number, TY: Number, X: Array2<TX>, Y: Array1<TY>> KMeans<TX, TY, X, Y> 
     }
 }
 
+
+
 #[cfg(test)]
 mod tests {
     use super::*;
