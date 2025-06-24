@@ -1,7 +1,6 @@
 use crate::{
     error::Failed,
-    linalg::basic::arrays::{Array, Array1, Array2},
-    metrics::distance::euclidian::Euclidian,
+    linalg::basic::arrays::{Array1, Array2},
     numbers::basenum::Number,
 };
 use std::collections::HashMap;
@@ -68,29 +67,29 @@ impl<TX: Number, TY: Number, X: Array2<TX>, Y: Array1<TY>> AgglomerativeClusteri
     fn compute_distance<'a>(
         data: &X,
         linkage: &Linkage,
-        cache: &mut HashMap<&'a Vec<usize>, f32>,
-        cluster1_indices: &'a Vec<usize>,
-        cluster2_indices: &'a Vec<usize>,
+        cache: &mut HashMap<Vec<usize>, f32>,
+        cluster1_indices: &Vec<usize>,
+        cluster2_indices: &Vec<usize>,
     ) -> f32 {
         match linkage {
             Linkage::Ward => {
-                let cluster1_variance = if let Some(variance) = cache.get(&cluster1_indices) {
+                let cluster1_variance = if let Some(variance) = cache.get(cluster1_indices) {
                     *variance
                 } else {
                     let cluster1_variance =
                         Self::compute_cluster_variance(&data, &cluster1_indices, &vec![]);
-                    cache.insert(&cluster1_indices, cluster1_variance);
+                    cache.insert(cluster1_indices.clone(), cluster1_variance);
                     cluster1_variance
                 };
-                let cluster2_variance = if let Some(variance) = cache.get(&cluster2_indices) {
+                let cluster2_variance = if let Some(variance) = cache.get(cluster2_indices) {
                     *variance
                 } else {
                     let cluster2_variance =
                         Self::compute_cluster_variance(&data, &cluster2_indices, &vec![]);
-                    cache.insert(&cluster2_indices, cluster2_variance);
+                    cache.insert(cluster2_indices.clone(), cluster2_variance);
                     cluster2_variance
                 };
-                let both_cluster_variance = cluster1_variance + cluster2_variance;
+                let both_cluster_variance = Self::compute_cluster_variance(&data, &cluster1_indices, &cluster2_indices);
                 let distance = both_cluster_variance - cluster1_variance - cluster2_variance;
                 distance
             }
@@ -115,7 +114,7 @@ impl<TX: Number, TY: Number, X: Array2<TX>, Y: Array1<TY>> AgglomerativeClusteri
                     &parameters.linkage,
                     &mut cache,
                     indices_mapping.get(&i).unwrap(),
-                    &indices_mapping.get(&j).unwrap(),
+                    indices_mapping.get(&j).unwrap(),
                 );
                 row.push(distance);
             }
@@ -146,10 +145,10 @@ impl<TX: Number, TY: Number, X: Array2<TX>, Y: Array1<TY>> AgglomerativeClusteri
             cache.remove(&cluster2_indices);
             let mut combined_cluster_indices = cluster1_indices;
             combined_cluster_indices.extend(cluster2_indices);
-            indices_mapping.insert(i, combined_cluster_indices);
             matrix[i] = (0..matrix[i].len())
                 .map(|j| {
-                    if let Some(other_cluster_indices) = indices_mapping.get(i + 1 + j) {
+                    let j_offset = i + 1 + j;
+                    if let Some(other_cluster_indices) = indices_mapping.get(&j_offset) {
                         Self::compute_distance(
                             &data,
                             &parameters.linkage,
@@ -164,7 +163,7 @@ impl<TX: Number, TY: Number, X: Array2<TX>, Y: Array1<TY>> AgglomerativeClusteri
                 .collect();
             for g in 0..i {
                 let offset = i - g - 1;
-                if let Some(other_cluster_indices) = indices_mapping.get(&offset) {
+                if let Some(other_cluster_indices) = indices_mapping.get(&g) {
                     matrix[g][offset] = Self::compute_distance(
                         &data,
                         &parameters.linkage,
@@ -174,11 +173,14 @@ impl<TX: Number, TY: Number, X: Array2<TX>, Y: Array1<TY>> AgglomerativeClusteri
                     )
                 }
             }
+            indices_mapping.insert(i, combined_cluster_indices);
         }
         let mut labels = vec![0; num_rows];
-        for (i, cluster) in indices_mapping.keys().enumerate() {
-            for index in indices_mapping[cluster] {
-                labels[index] = i
+        let mut sorted_keys: Vec<&usize> = indices_mapping.keys().collect();
+        sorted_keys.sort();
+        for (i, cluster) in sorted_keys.iter().enumerate() {
+            for index in indices_mapping.get(cluster).unwrap() {
+                labels[*index] = i
             }
         }
         Ok(Self {
