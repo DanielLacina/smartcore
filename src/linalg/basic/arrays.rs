@@ -170,6 +170,7 @@ pub trait ArrayView1<T: Debug + Display + Copy + Sized>: Array<T, usize> {
             .map(|(s, o)| *s * *o)
             .sum()
     }
+
     /// return sum of all value of the view
     fn sum(&self) -> T
     where
