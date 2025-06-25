@@ -53,15 +53,14 @@
 //! * "An Introduction to Statistical Learning", James G., Witten D., Hastie T., Tibshirani R., Chapter 10
 //! * "Hierarchical Grouping to Optimize an Objective Function", Ward, J. H., Jr., 1963
 //! * "Finding Groups in Data: An Introduction to Cluster Analysis", Kaufman, L., Rousseeuw, P.J., 1990
+use crate::api::UnsupervisedEstimator;
 use crate::{
     error::Failed,
     linalg::basic::arrays::{Array1, Array2},
     numbers::basenum::Number,
 };
-use crate::api::{UnsupervisedEstimator};
 use std::collections::HashMap;
-use std::{f32, iter::zip, marker::PhantomData};
-use std::collections::HashSet;
+use std::{f64, iter::zip, marker::PhantomData};
 
 /// Defines the linkage criterion to use for Agglomerative Clustering.
 ///
@@ -139,7 +138,7 @@ impl<TX: Number, TY: Number, X: Array2<TX>, Y: Array1<TY>> AgglomerativeClusteri
     ///
     /// # Returns
     ///
-    /// The variance of the combined cluster as an `f32`.
+    /// The variance of the combined cluster as an `f64`.
     fn compute_cluster_variance(
         data: &X,
         cluster1_indices: &Vec<usize>,
@@ -149,7 +148,7 @@ impl<TX: Number, TY: Number, X: Array2<TX>, Y: Array1<TY>> AgglomerativeClusteri
         let mut sum_row = vec![0 as f64; num_features];
 
         // Sum up all feature vectors for the points in the given clusters
-        for cluster in vec![cluster1_indices, cluster2_indices] {
+        for cluster in [cluster1_indices, cluster2_indices] {
             for index in cluster {
                 sum_row = zip(sum_row, data.get_row(*index).iterator(0))
                     .map(|(v, x)| v + x.to_f64().unwrap())
@@ -163,11 +162,11 @@ impl<TX: Number, TY: Number, X: Array2<TX>, Y: Array1<TY>> AgglomerativeClusteri
 
         let mut variance = 0.0;
         // Calculate the sum of squared distances from each point to the mean
-        for cluster in vec![cluster1_indices, cluster2_indices] {
+        for cluster in [cluster1_indices, cluster2_indices] {
             for index in cluster {
                 let squared_distance: f64 = zip(data.get_row(*index).iterator(0), mean_row.iter())
                     .map(|(x, v)| (x.to_f64().unwrap() - *v).powf(2.0))
-                    .sum();
+                    .sum::<f64>();
                 variance += squared_distance;
             }
         }
@@ -186,8 +185,8 @@ impl<TX: Number, TY: Number, X: Array2<TX>, Y: Array1<TY>> AgglomerativeClusteri
     ///
     /// # Returns
     ///
-    /// The distance between the two clusters as an `f32`.
-    fn compute_distance<'a>(
+    /// The distance between the two clusters as an `f64`.
+    fn compute_distance(
         data: &X,
         linkage: &Linkage,
         cache: &mut HashMap<Vec<usize>, f64>,
@@ -205,7 +204,7 @@ impl<TX: Number, TY: Number, X: Array2<TX>, Y: Array1<TY>> AgglomerativeClusteri
                     *variance
                 } else {
                     let cluster1_variance =
-                        Self::compute_cluster_variance(&data, &cluster1_indices, &vec![]);
+                        Self::compute_cluster_variance(data, cluster1_indices, &vec![]);
                     cache.insert(cluster1_indices.clone(), cluster1_variance);
                     cluster1_variance
                 };
@@ -215,18 +214,17 @@ impl<TX: Number, TY: Number, X: Array2<TX>, Y: Array1<TY>> AgglomerativeClusteri
                     *variance
                 } else {
                     let cluster2_variance =
-                        Self::compute_cluster_variance(&data, &cluster2_indices, &vec![]);
+                        Self::compute_cluster_variance(data, cluster2_indices, &vec![]);
                     cache.insert(cluster2_indices.clone(), cluster2_variance);
                     cluster2_variance
                 };
 
                 // Compute variance of the merged cluster
                 let both_cluster_variance =
-                    Self::compute_cluster_variance(&data, &cluster1_indices, &cluster2_indices);
+                    Self::compute_cluster_variance(data, cluster1_indices, cluster2_indices);
 
                 // The increase in variance is the distance
-                let distance = both_cluster_variance - cluster1_variance - cluster2_variance;
-                distance
+                both_cluster_variance - cluster1_variance - cluster2_variance
             }
         }
     }
@@ -246,11 +244,6 @@ impl<TX: Number, TY: Number, X: Array2<TX>, Y: Array1<TY>> AgglomerativeClusteri
     ///
     /// A `Result` which is `Ok` containing an `AgglomerativeClustering` instance with the
     /// final cluster labels, or an `Err` with a `Failed` error type if something goes wrong.
-    ///
-
-    /// let clustering_result = AgglomerativeClustering::fit(&data, params).unwrap();
-    /// // `clustering_result.labels` will contain the cluster assignment for each row of data.
-    /// ```
     pub fn fit(
         data: &X,
         parameters: AgglomerativeClusteringParameters,
@@ -323,11 +316,11 @@ impl<TX: Number, TY: Number, X: Array2<TX>, Y: Array1<TY>> AgglomerativeClusteri
                     let j_offset = i + 1 + j;
                     if let Some(other_cluster_indices) = indices_mapping.get(&j_offset) {
                         Self::compute_distance(
-                            &data,
+                            data,
                             &parameters.linkage,
                             &mut cache,
                             &combined_cluster_indices,
-                            &other_cluster_indices,
+                            other_cluster_indices,
                         )
                     } else {
                         0.0 // This entry is now invalid as the other cluster was merged.
@@ -335,16 +328,17 @@ impl<TX: Number, TY: Number, X: Array2<TX>, Y: Array1<TY>> AgglomerativeClusteri
                 })
                 .collect();
 
+            #[allow(clippy::needless_range_loop)]
             // Update distances from all other clusters `g` to the new cluster `i` where `g < i`.
             for g in 0..i {
                 let offset = i - g - 1;
                 if let Some(other_cluster_indices) = indices_mapping.get(&g) {
                     matrix[g][offset] = Self::compute_distance(
-                        &data,
+                        data,
                         &parameters.linkage,
                         &mut cache,
                         &combined_cluster_indices, // Order does not matter for Ward's method.
-                        &other_cluster_indices,
+                        other_cluster_indices,
                     )
                 }
             }
@@ -373,7 +367,8 @@ impl<TX: Number, TY: Number, X: Array2<TX>, Y: Array1<TY>> AgglomerativeClusteri
 }
 
 impl<TX: Number, TY: Number, X: Array2<TX>, Y: Array1<TY>>
-    UnsupervisedEstimator<X, AgglomerativeClusteringParameters> for AgglomerativeClustering<TX, TY, X, Y>
+    UnsupervisedEstimator<X, AgglomerativeClusteringParameters>
+    for AgglomerativeClustering<TX, TY, X, Y>
 {
     fn fit(x: &X, parameters: AgglomerativeClusteringParameters) -> Result<Self, Failed> {
         AgglomerativeClustering::fit(x, parameters)
@@ -386,7 +381,7 @@ mod tests {
     use crate::linalg::basic::matrix::DenseMatrix;
     use std::collections::HashSet;
 
-    fn assert_approx_eq(a: f32, b: f32) {
+    fn assert_approx_eq(a: f64, b: f64) {
         assert!(
             (a - b).abs() < 1e-6,
             "assertion failed: `(left !== right)` \n left: `{:?}`\n right: `{:?}`",
@@ -401,7 +396,7 @@ mod tests {
 
         // Variance of a single point is 0
         let variance1 =
-            AgglomerativeClustering::<f32, f32, DenseMatrix<f32>, Vec<f32>>::compute_cluster_variance(
+            AgglomerativeClustering::<f64, f64, DenseMatrix<f64>, Vec<f64>>::compute_cluster_variance(
                 &data,
                 &vec![0],
                 &vec![],
@@ -412,7 +407,7 @@ mod tests {
         // Mean is [2,2]
         // Variance = ((1-2)^2 + (1-2)^2) + ((3-2)^2 + (3-2)^2) = (1+1) + (1+1) = 4.0
         let variance2 =
-            AgglomerativeClustering::<f32, f32, DenseMatrix<f32>, Vec<f32>>::compute_cluster_variance(
+            AgglomerativeClustering::<f64, f64, DenseMatrix<f64>, Vec<f64>>::compute_cluster_variance(
                 &data,
                 &vec![0],
                 &vec![1],
@@ -424,7 +419,7 @@ mod tests {
         // Variance = ((1-3)^2+(1-3)^2) + ((3-3)^2+(3-3)^2) + ((5-3)^2+(5-3)^2)
         //          = (4+4) + (0+0) + (4+4) = 16.0
         let variance3 =
-            AgglomerativeClustering::<f32, f32, DenseMatrix<f32>, Vec<f32>>::compute_cluster_variance(
+            AgglomerativeClustering::<f64, f64, DenseMatrix<f64>, Vec<f64>>::compute_cluster_variance(
                 &data,
                 &vec![0, 1, 2],
                 &vec![],
@@ -444,7 +439,7 @@ mod tests {
         // var(c1 U c2) = 4.0 (from test above)
         // distance = 4.0 - 0 - 0 = 4.0
         let distance =
-            AgglomerativeClustering::<f32, f32, DenseMatrix<f32>, Vec<f32>>::compute_distance(
+            AgglomerativeClustering::<f64, f64, DenseMatrix<f64>, Vec<f64>>::compute_distance(
                 &data,
                 &Linkage::Ward,
                 &mut cache,
@@ -476,7 +471,7 @@ mod tests {
         };
 
         let result =
-            AgglomerativeClustering::<f64, f32, DenseMatrix<f64>, Vec<f32>>::fit(&data, params)
+            AgglomerativeClustering::<f64, f64, DenseMatrix<f64>, Vec<f64>>::fit(&data, params)
                 .unwrap();
         let labels = result.labels;
 
@@ -511,7 +506,7 @@ mod tests {
             linkage: Linkage::Ward,
         };
         let result_3 =
-            AgglomerativeClustering::<f64, f32, DenseMatrix<f64>, Vec<f32>>::fit(&data, params_3)
+            AgglomerativeClustering::<f64, f64, DenseMatrix<f64>, Vec<f64>>::fit(&data, params_3)
                 .unwrap();
         let unique_labels_3: HashSet<usize> = result_3.labels.into_iter().collect();
         assert_eq!(unique_labels_3.len(), 3);
@@ -522,79 +517,79 @@ mod tests {
             linkage: Linkage::Ward,
         };
         let result_1 =
-            AgglomerativeClustering::<f64, f32, DenseMatrix<f64>, Vec<f32>>::fit(&data, params_1)
+            AgglomerativeClustering::<f64, f64, DenseMatrix<f64>, Vec<f64>>::fit(&data, params_1)
                 .unwrap();
         let unique_labels_1: HashSet<usize> = result_1.labels.into_iter().collect();
         assert_eq!(unique_labels_1.len(), 1);
     }
 
-   #[test]
-fn test_fit_heavy_load_deterministic() {
-    let n_clusters = 5;
+    #[test]
+    fn test_fit_heavy_load_deterministic() {
+        let n_clusters = 5;
 
-    // Define cluster properties: (center_x, center_y, num_points)
-    let cluster_definitions = vec![
-        (0.0, 0.0, 10),
-        (100.0, 0.0, 20),
-        (0.0, 100.0, 15),
-        (100.0, 100.0, 25),
-        (50.0, -50.0, 5),
-    ];
+        // Define cluster properties: (center_x, center_y, num_points)
+        let cluster_definitions = vec![
+            (0.0, 0.0, 10),
+            (100.0, 0.0, 20),
+            (0.0, 100.0, 15),
+            (100.0, 100.0, 25),
+            (50.0, -50.0, 5),
+        ];
 
-    // The expected sizes of the final clusters.
-    let mut expected_counts: Vec<usize> =
-        cluster_definitions.iter().map(|c| c.2).collect();
-    expected_counts.sort_unstable();
+        // The expected sizes of the final clusters.
+        let mut expected_counts: Vec<usize> = cluster_definitions.iter().map(|c| c.2).collect();
+        expected_counts.sort_unstable();
 
-    let mut data_vec: Vec<Vec<f32>> = Vec::new();
+        let mut data_vec: Vec<Vec<f64>> = Vec::new();
 
-    // Generate data points for each cluster deterministically.
-    for (center_x, center_y, num_points) in cluster_definitions {
-        for i in 0..num_points {
-            // Add a small, predictable offset to each point based on its index.
-            // This creates a small, non-random spread around the center.
-            let offset = i as f32 * 0.1;
-            let x = center_x + offset;
-            let y = center_y + offset;
-            data_vec.push(vec![x, y]);
+        // Generate data points for each cluster deterministically.
+        for (center_x, center_y, num_points) in cluster_definitions {
+            for i in 0..num_points {
+                // Add a small, predictable offset to each point based on its index.
+                // This creates a small, non-random spread around the center.
+                let offset = i as f64 * 0.1;
+                let x = center_x + offset;
+                let y = center_y + offset;
+                data_vec.push(vec![x, y]);
+            }
         }
+
+        // Convert to DenseMatrix
+        let data_refs: Vec<&[f64]> = data_vec.iter().map(|row| row.as_slice()).collect();
+        let data = DenseMatrix::from_2d_array(&data_refs).unwrap();
+
+        // Run clustering
+        let params = AgglomerativeClusteringParameters {
+            n_clusters,
+            linkage: Linkage::Ward,
+        };
+        let result =
+            AgglomerativeClustering::<f64, f64, DenseMatrix<f64>, Vec<f64>>::fit(&data, params)
+                .unwrap();
+        let labels = result.labels;
+
+        // 1. Verify the number of distinct clusters found
+        let unique_labels: HashSet<usize> = labels.iter().cloned().collect();
+        assert_eq!(
+            unique_labels.len(),
+            n_clusters,
+            "Expected {} distinct clusters, but found {}",
+            n_clusters,
+            unique_labels.len()
+        );
+
+        // 2. Verify the number of members in each cluster
+        let mut label_counts: HashMap<usize, usize> = HashMap::new();
+        for label in labels {
+            *label_counts.entry(label).or_insert(0) += 1;
+        }
+
+        let mut actual_counts: Vec<usize> = label_counts.values().cloned().collect();
+        actual_counts.sort_unstable();
+
+        assert_eq!(
+            actual_counts, expected_counts,
+            "Cluster sizes do not match expected values"
+        );
     }
-
-    // Convert to DenseMatrix
-    let data_refs: Vec<&[f32]> = data_vec.iter().map(|row| row.as_slice()).collect();
-    let data = DenseMatrix::from_2d_array(&data_refs).unwrap();
-
-    // Run clustering
-    let params = AgglomerativeClusteringParameters {
-        n_clusters,
-        linkage: Linkage::Ward,
-    };
-    let result = AgglomerativeClustering::<f32, f32, DenseMatrix<f32>, Vec<f32>>::fit(&data, params).unwrap();
-    let labels = result.labels;
-
-    // 1. Verify the number of distinct clusters found
-    let unique_labels: HashSet<usize> = labels.iter().cloned().collect();
-    assert_eq!(
-        unique_labels.len(),
-        n_clusters,
-        "Expected {} distinct clusters, but found {}",
-        n_clusters,
-        unique_labels.len()
-    );
-
-    // 2. Verify the number of members in each cluster
-    let mut label_counts: HashMap<usize, usize> = HashMap::new();
-    for label in labels {
-        *label_counts.entry(label).or_insert(0) += 1;
-    }
-
-    let mut actual_counts: Vec<usize> = label_counts.values().cloned().collect();
-    actual_counts.sort_unstable();
-
-    assert_eq!(
-        actual_counts, expected_counts,
-        "Cluster sizes do not match expected values"
-    );
-}
- 
 }
