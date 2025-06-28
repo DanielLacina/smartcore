@@ -7,89 +7,89 @@ use crate::linalg::basic::arrays::{Array2, ArrayView1};
 use crate::numbers::floatnum::FloatNumber;
 use crate::numbers::realnum::RealNumber;
 
-pub struct KDTree {
-    dim: usize,
-    left: Option<Box<KDTree>>,
-    right: Option<Box<KDTree>>,
-    label: Option<usize>,
-    data: Option<Vec<f64>>
+
+pub struct KdNode {
+    left: Option<Box<KdNode>>,
+    right: Option<Box<KdNode>>,
+    label: usize,
+    row: Vec<f64>
 }
 
-impl KDTree {
+impl KdNode {
+    pub fn new(row: Vec<f64>, label: usize) -> Self {
+        Self {
+            left: None,
+            right: None,
+            row,
+            label
+        }
+
+    }
+}
+
+pub struct KdTree {
+    dim: usize,
+    root: Option<Box<KdNode>>
+}
+
+impl KdTree {
     pub fn new(dim: usize) -> Self {
         Self {
             dim,
-            left: None,
-            right: None,
-            label: None,
-            data: None  
+            root: None
         }
     }
 
-    fn create_subtree(dim: usize, data: Vec<f64>, label: usize) -> Self {
-        Self {
-            dim,
-            data: Some(data), 
-            label: Some(label),
-            left: None,
-            right: None
+    pub fn create_tree(&mut self, data: Vec<Vec<f64>>, labels: Vec<usize>) {
+        let data: Vec<(Vec<f64>, usize)> = zip(data, labels).map(|(row, label)| (row, label)).collect();
+        self.root = self._create_tree(data, 0); 
+
+    }
+
+    fn _create_tree(&self, data: Vec<(Vec<f64>, usize)>, depth: usize) -> Option<Box<KdNode>> {
+        let i = depth % self.dim;  
+        if data.len() == 0 {
+            return None;
         }
-    }
-
-    pub fn add(&mut self, data: Vec<f64>, label: usize) {
-        self.add_subtree(data, label, 0);       
-    }
-
-    fn add_subtree(&mut self, data: Vec<f64>, label: usize, depth: usize) {
-        let i = depth % self.dim;
-        if self.data.is_none() {
-            self.data = Some(data);
-            self.label = Some(label);
-        } else {
-            let self_data = self.data.as_ref().unwrap();
-            let primary_node = if data[i] <= self_data[i] {
-                &mut self.left
-            } else {
-                &mut self.right
-            };
-            if let Some(primary_node) = primary_node.as_mut() {
-                primary_node.add_subtree(data, label, depth + 1);
-            } else {
-                *primary_node = Some(Box::new(Self::create_subtree(self.dim, data, label)));
-            }
-        } 
-    }
+        let mut data = data;
+        data.sort_by(|a, b| a.0[i].partial_cmp(&b.0[i]).unwrap());
+        let median = data.len()/2;
+        let (row, label) = data[median].clone();
+        let mut root = KdNode::new(row, label);
+        root.left = self._create_tree(data[0..median].to_vec(), depth + 1);
+        root.right = self._create_tree(data[median + 1..data.len()].to_vec(), depth + 1);
+        Some(Box::new(root))
+    } 
 
     pub fn nearest(&self, data: &Vec<f64>, label:  usize) -> (f64, usize) {
-        let (min_distance, label) = self.nearest_subtree(data, label, 0);
-        (min_distance, label.unwrap())
+        let root = self.root.as_ref().unwrap();
+        let (min_distance, label) = self._nearest(root, data, label, 0);
+        (f64::sqrt(min_distance), label.unwrap())
     }
 
-    fn nearest_subtree(&self, data: &Vec<f64>, label: usize, depth: usize) -> (f64, Option<usize>) {
+    fn _nearest(&self, node: &Box<KdNode>, row: &Vec<f64>, label: usize, depth: usize) -> (f64, Option<usize>) {
         let i = depth % self.dim;
-        let self_data = self.data.as_ref().unwrap();
-        let self_label = self.label.as_ref().unwrap();
-        let (primary_node, secondary_node) = if data[i] <= self_data[i] {
-           (&self.left, &self.right)
+        let (primary_node, secondary_node) = if row[i] <= node.row[i] {
+           (&node.left, &node.right)
         } else {
-            (&self.right, &self.left)
+            (&node.right, &node.left)
         };
         let mut min_label = None;
         let mut min_distance = f64::INFINITY;
         if let Some(primary_node) = primary_node {
-             (min_distance, min_label) = primary_node.nearest_subtree(data, label, depth + 1);
+             (min_distance, min_label) = self._nearest(primary_node, row, label, depth + 1);
         }
-        let perp_distance = f64::abs(self_data[i] - data[i]);
+        let perp_distance = f64::abs(node.row[i] - row[i]);
         if perp_distance < min_distance {
-             if *self_label != label {
-                let distance_to_self: f64 = f64::sqrt(zip(self_data, data.iter()).map(|(v, x)| (v - x).powf(2.0)).sum());
-                if distance_to_self < min_distance {
-                    min_distance = distance_to_self;
-                    min_label = Some(*self_label); 
+             if node.label != label {
+                let distance_to_node: f64 = zip(node.row.iter(), row.iter()).map(|(v, x)| (v - x).powf(2.0)).sum();
+                if distance_to_node < min_distance {
+                    min_distance = distance_to_node;
+                    min_label = Some(node.label); 
                 }
             }
             if let Some(secondary_node) = secondary_node {
-                let (secondary_distance, secondary_label) = secondary_node.nearest_subtree(data, label, depth + 1); 
+                let (secondary_distance, secondary_label) = self._nearest(secondary_node, row, label, depth + 1); 
                 if secondary_distance < min_distance {
                     min_distance = secondary_distance;
                     min_label = secondary_label;
@@ -99,48 +99,48 @@ impl KDTree {
         (min_distance, min_label)
 
     }
+    
+ } 
 
+// // The Cluster struct no longer needs PartialEq as we will use IDs for comparison.
+// // Clone is kept for convenience, but the main loop avoids using it.
+// #[derive(Clone, Debug)]
+// pub struct Cluster {
+//     sum: Vec<f64>,
+//     average: Vec<f64>,
+//     /// Contains the indices of the original data points belonging to this cluster.
+//     values: Vec<usize>,
+// }
 
-}
-// The Cluster struct no longer needs PartialEq as we will use IDs for comparison.
-// Clone is kept for convenience, but the main loop avoids using it.
-#[derive(Clone, Debug)]
-pub struct Cluster {
-    sum: Vec<f64>,
-    average: Vec<f64>,
-    /// Contains the indices of the original data points belonging to this cluster.
-    values: Vec<usize>,
-}
+// impl Cluster {
+//     /// Creates a new cluster from a single data point.
+//     pub fn new(point_index: usize, data: Vec<f64>) -> Self {
+//         Self {
+//             sum: data.clone(),
+//             average: data,
+//             values: vec![point_index],
+//         }
+//     }
 
-impl Cluster {
-    /// Creates a new cluster from a single data point.
-    pub fn new(point_index: usize, data: Vec<f64>) -> Self {
-        Self {
-            sum: data.clone(),
-            average: data,
-            values: vec![point_index],
-        }
-    }
+//     /// Merges another cluster into this one efficiently.
+//     /// This method now takes ownership of `other` to avoid cloning its internal vectors.
+//     /// It also performs calculations in-place to prevent new memory allocations.
+//     pub fn add_cluster(&mut self, mut other: Cluster) {
+//         // Extend the list of point indices. append is O(1).
+//         self.values.append(&mut other.values);
 
-    /// Merges another cluster into this one efficiently.
-    /// This method now takes ownership of `other` to avoid cloning its internal vectors.
-    /// It also performs calculations in-place to prevent new memory allocations.
-    pub fn add_cluster(&mut self, mut other: Cluster) {
-        // Extend the list of point indices. append is O(1).
-        self.values.append(&mut other.values);
+//         // Update the sum of all points' coordinates in-place.
+//         for (s_val, o_val) in self.sum.iter_mut().zip(other.sum.iter()) {
+//             *s_val += *o_val;
+//         }
 
-        // Update the sum of all points' coordinates in-place.
-        for (s_val, o_val) in self.sum.iter_mut().zip(other.sum.iter()) {
-            *s_val += *o_val;
-        }
-
-        // Recalculate the average (centroid) in-place.
-        let n = self.values.len() as f64;
-        for i in 0..self.average.len() {
-            self.average[i] = self.sum[i] / n;
-        }
-    }
-}
+//         // Recalculate the average (centroid) in-place.
+//         let n = self.values.len() as f64;
+//         for i in 0..self.average.len() {
+//             self.average[i] = self.sum[i] / n;
+//         }
+//     }
+// }
 
 // pub struct AgglomerativeClustering<TX, X> {
 //     pub labels: Vec<usize>,
@@ -159,14 +159,13 @@ impl Cluster {
 //             return Err("At least 2 samples are required for clustering.".to_string());
 //         }
 
-//         // The KdTree will only store the location (average) and a lightweight ID.
 //         let mut kdtree = KdTree::new(num_features);
 //         // The HashMap is the single source of truth for all cluster data.
 //         let mut clusters = HashMap::with_capacity(num_samples);
         
 //         // --- Initialization ---
 //         for i in 0..num_samples {
-//             let point_data: Vec<f64> = data.get_row(i).iterator(0).map(|x| x.to_f64().unwrap()).collect();
+//             let point_data: Vec<f64> = data.get_row(i).iterator(0).map(|x| x.to_f64().unwrap().collect());
 
 //             // Create the initial cluster.
 //             let cluster = Cluster::new(i, point_data.clone());
