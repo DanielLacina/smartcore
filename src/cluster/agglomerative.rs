@@ -1,216 +1,250 @@
-use std::collections::BinaryHeap;
+use core::f64;
+use std::collections::HashMap;
+use std::iter::zip;
 use std::marker::PhantomData;
-use std::cmp::Ordering;
 
-use crate::linalg::basic::arrays::Array2;
+use crate::linalg::basic::arrays::{Array2, ArrayView1};
 use crate::numbers::floatnum::FloatNumber;
 use crate::numbers::realnum::RealNumber;
 
-// --- Helper Structs ---
-
-// Represents the distance between two nodes (points or clusters).
-#[derive(Debug, Clone, PartialEq)]
-pub struct PairwiseDistance {
-    pub node1: usize,
-    pub node2: usize,
-    pub distance: f64,
+pub struct KDTree {
+    dim: usize,
+    left: Option<Box<KDTree>>,
+    right: Option<Box<KDTree>>,
+    label: Option<usize>,
+    data: Option<Vec<f64>>
 }
 
-// We need to implement Eq, Ord, and PartialOrd to use this in a BinaryHeap.
-// The default BinaryHeap is a max-heap, so we reverse the ordering
-// to make it behave like a min-heap (smallest distance has highest priority).
-impl Eq for PairwiseDistance {}
-
-impl PartialOrd for PairwiseDistance {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        other.distance.partial_cmp(&self.distance)
-    }
-}
-
-impl Ord for PairwiseDistance {
-    fn cmp(&self, other: &Self) -> Ordering {
-        self.partial_cmp(other).unwrap_or(Ordering::Equal)
-    }
-}
-
-
-// Represents a node in the final dendrogram (the output hierarchy).
-#[derive(Debug, Clone)]
-pub struct LinkageNode {
-    pub left: Option<Box<LinkageNode>>,
-    pub right: Option<Box<LinkageNode>>,
-    pub index: usize, // For leaf nodes, this is the original point index.
-    pub distance: f64, // The distance at which this node/merge was created.
-}
-
-impl LinkageNode {
-    /// Creates a new leaf node for an original data point.
-    fn new_leaf(index: usize) -> Self {
-        Self { left: None, right: None, index, distance: 0.0 }
-    }
-
-    /// Creates a new internal node representing a merge.
-    fn new_internal(left: LinkageNode, right: LinkageNode, distance: f64) -> Self {
+impl KDTree {
+    pub fn new(dim: usize) -> Self {
         Self {
-            left: Some(Box::new(left)),
-            right: Some(Box::new(right)),
-            index: usize::MAX, // Sentinel value indicating it's not a leaf.
-            distance,
-        }
-    }
-}
-
-
-// --- The Efficient Data Structure: Disjoint Set Union (DSU) ---
-
-/// A Disjoint Set Union (DSU) data structure, also known as Union-Find.
-/// It tracks a collection of disjoint sets and provides two main operations:
-/// 1. `find`: Determine which set an element belongs to (i.e., find its root).
-/// 2. `union`: Join two sets together.
-/// This implementation uses path compression and union by size for optimal performance.
-pub struct Dsu {
-    parent: Vec<usize>,
-    size: Vec<usize>,
-}
-
-impl Dsu {
-    /// Creates a new DSU with `n` elements, each in its own set.
-    pub fn new(n: usize) -> Self {
-        Dsu {
-            parent: (0..n).collect(),
-            size: vec![1; n],
+            dim,
+            left: None,
+            right: None,
+            label: None,
+            data: None  
         }
     }
 
-    /// Finds the representative (or root) of the set containing element `i`.
-    /// Implements path compression for efficiency.
-    pub fn find(&mut self, mut i: usize) -> usize {
-        let mut root = i;
-        while root != self.parent[root] {
-            root = self.parent[root];
+    fn create_subtree(dim: usize, data: Vec<f64>, label: usize) -> Self {
+        Self {
+            dim,
+            data: Some(data), 
+            label: Some(label),
+            left: None,
+            right: None
         }
-        // Path compression: set parent of all nodes on the path to the root
-        while i != root {
-            let next_i = self.parent[i];
-            self.parent[i] = root;
-            i = next_i;
-        }
-        root
     }
 
-    /// Merges the sets containing elements `i` and `j`.
-    /// Returns the root of the new merged set.
-    pub fn union(&mut self, i: usize, j: usize) -> usize {
-        let mut root_i = self.find(i);
-        let mut root_j = self.find(j);
-        if root_i != root_j {
-            // Union by size: merge smaller tree into larger tree
-            if self.size[root_i] < self.size[root_j] {
-                std::mem::swap(&mut root_i, &mut root_j);
+    pub fn add(&mut self, data: Vec<f64>, label: usize) {
+        self.add_subtree(data, label, 0);       
+    }
+
+    fn add_subtree(&mut self, data: Vec<f64>, label: usize, depth: usize) {
+        let i = depth % self.dim;
+        if self.data.is_none() {
+            self.data = Some(data);
+            self.label = Some(label);
+        } else {
+            let self_data = self.data.as_ref().unwrap();
+            let primary_node = if data[i] <= self_data[i] {
+                &mut self.left
+            } else {
+                &mut self.right
+            };
+            if let Some(primary_node) = primary_node.as_mut() {
+                primary_node.add_subtree(data, label, depth + 1);
+            } else {
+                *primary_node = Some(Box::new(Self::create_subtree(self.dim, data, label)));
             }
-            self.parent[root_j] = root_i;
-            self.size[root_i] += self.size[root_j];
-        }
-        root_i
+        } 
     }
-}
 
+    pub fn nearest(&self, data: &Vec<f64>, label:  usize) -> (f64, usize) {
+        let (min_distance, label) = self.nearest_subtree(data, label, 0);
+        (min_distance, label.unwrap())
+    }
 
-// --- Main Clustering Struct and Refactored `fit` Function ---
-
-pub struct AgglomerativeClustering<TX, X> {
-    pub labels: Vec<usize>,
-    pub dendrogram: LinkageNode,
-    _phantom_tx: PhantomData<TX>,
-    _phantom_x: PhantomData<X>,
-}
-
-impl<TX: FloatNumber + RealNumber, X: Array2<TX>> AgglomerativeClustering<TX, X>
-where
-    TX: Copy + Into<f64> + std::ops::Sub<Output = TX>,
-    f64: From<TX>,
-{
-    /// An efficient implementation of agglomerative clustering using a
-    /// priority queue (min-heap) and a Disjoint Set Union (DSU) data structure.
-    pub fn fit(data: &X) -> Result<Self, String> {
-        let (num_samples, _) = data.shape();
-        if num_samples == 0 {
-            return Err("Cannot cluster empty data.".to_string());
+    fn nearest_subtree(&self, data: &Vec<f64>, label: usize, depth: usize) -> (f64, Option<usize>) {
+        let i = depth % self.dim;
+        let self_data = self.data.as_ref().unwrap();
+        let self_label = self.label.as_ref().unwrap();
+        let (primary_node, secondary_node) = if data[i] <= self_data[i] {
+           (&self.left, &self.right)
+        } else {
+            (&self.right, &self.left)
+        };
+        let mut min_label = None;
+        let mut min_distance = f64::INFINITY;
+        if let Some(primary_node) = primary_node {
+             (min_distance, min_label) = primary_node.nearest_subtree(data, label, depth + 1);
         }
-        if num_samples == 1 {
-            return Ok(Self {
-                labels: vec![0],
-                dendrogram: LinkageNode::new_leaf(0),
-                _phantom_tx: PhantomData,
-                _phantom_x: PhantomData,
-            });
-        }
-
-        // 1. Calculate all pairwise distances and populate a min-priority-queue.
-        let mut pq = BinaryHeap::new();
-        for i in 0..num_samples {
-            let row_i = data.get_row(i);
-            for j in (i + 1)..num_samples {
-                let row_j = data.get_row(j);
-
-                // Efficient distance calculation using iterators (no allocations)
-                let distance: f64 = row_i.iterator(0).zip(row_j.iterator(0)).map(|(&a, &b)| {
-                    let diff = f64::from(a) - f64::from(b);
-                    diff * diff
-                }).sum();
-
-                pq.push(PairwiseDistance { node1: i, node2: j, distance });
-            }
-        }
-
-        // 2. Initialize DSU for tracking cluster membership and storage for dendrogram nodes.
-        let mut dsu = Dsu::new(num_samples);
-        let mut nodes: Vec<Option<LinkageNode>> = (0..num_samples)
-            .map(|i| Some(LinkageNode::new_leaf(i)))
-            .collect();
-
-        // 3. Main merging loop. We need to perform n-1 merges.
-        let required_merges = num_samples - 1;
-        for _ in 0..required_merges {
-            // 4. Pop the next closest pair from the priority queue until we find a valid merge.
-            loop {
-                let closest_pair = pq.pop().ok_or("Priority queue exhausted before all merges were complete.")?;
-
-                let root1 = dsu.find(closest_pair.node1);
-                let root2 = dsu.find(closest_pair.node2);
-
-                // If they are not already in the same cluster, merge them.
-                if root1 != root2 {
-                    // Take ownership of the nodes to be merged.
-                    let node1 = nodes[root1].take().expect("Node 1 should exist.");
-                    let node2 = nodes[root2].take().expect("Node 2 should exist.");
-
-                    // Create the new parent node representing the merge.
-                    let new_node = LinkageNode::new_internal(node1, node2, closest_pair.distance.sqrt());
-
-                    // Merge the sets and get the new root for the combined cluster.
-                    let new_root = dsu.union(root1, root2);
-
-                    // Store the new merged node at the root's index.
-                    nodes[new_root] = Some(new_node);
-
-                    // Break the inner loop since we've completed a merge.
-                    break;
+        let perp_distance = f64::abs(self_data[i] - data[i]);
+        if perp_distance < min_distance {
+             if *self_label != label {
+                let distance_to_self: f64 = f64::sqrt(zip(self_data, data.iter()).map(|(v, x)| (v - x).powf(2.0)).sum());
+                if distance_to_self < min_distance {
+                    min_distance = distance_to_self;
+                    min_label = Some(*self_label); 
                 }
-                // If they were already in the same cluster, this pair is "stale".
-                // The loop continues, popping the next closest pair.
+            }
+            if let Some(secondary_node) = secondary_node {
+                let (secondary_distance, secondary_label) = secondary_node.nearest_subtree(data, label, depth + 1); 
+                if secondary_distance < min_distance {
+                    min_distance = secondary_distance;
+                    min_label = secondary_label;
+                }
             }
         }
+        (min_distance, min_label)
 
-        // 5. Extract the final dendrogram, which is the last remaining node.
-        let final_root = dsu.find(0);
-        let dendrogram = nodes[final_root].take().expect("Final dendrogram should exist.");
+    }
 
-        Ok(Self {
-            labels: Vec::new(), // Label assignment can be a separate step.
-            dendrogram,
-            _phantom_tx: PhantomData,
-            _phantom_x: PhantomData,
-        })
+
+}
+// The Cluster struct no longer needs PartialEq as we will use IDs for comparison.
+// Clone is kept for convenience, but the main loop avoids using it.
+#[derive(Clone, Debug)]
+pub struct Cluster {
+    sum: Vec<f64>,
+    average: Vec<f64>,
+    /// Contains the indices of the original data points belonging to this cluster.
+    values: Vec<usize>,
+}
+
+impl Cluster {
+    /// Creates a new cluster from a single data point.
+    pub fn new(point_index: usize, data: Vec<f64>) -> Self {
+        Self {
+            sum: data.clone(),
+            average: data,
+            values: vec![point_index],
+        }
+    }
+
+    /// Merges another cluster into this one efficiently.
+    /// This method now takes ownership of `other` to avoid cloning its internal vectors.
+    /// It also performs calculations in-place to prevent new memory allocations.
+    pub fn add_cluster(&mut self, mut other: Cluster) {
+        // Extend the list of point indices. append is O(1).
+        self.values.append(&mut other.values);
+
+        // Update the sum of all points' coordinates in-place.
+        for (s_val, o_val) in self.sum.iter_mut().zip(other.sum.iter()) {
+            *s_val += *o_val;
+        }
+
+        // Recalculate the average (centroid) in-place.
+        let n = self.values.len() as f64;
+        for i in 0..self.average.len() {
+            self.average[i] = self.sum[i] / n;
+        }
     }
 }
+
+// pub struct AgglomerativeClustering<TX, X> {
+//     pub labels: Vec<usize>,
+//     _phantom_tx: PhantomData<TX>,
+//     _phantom_x: PhantomData<X>,
+// }
+
+// impl<TX: FloatNumber + RealNumber, X: Array2<TX>> AgglomerativeClustering<TX, X>
+// where
+//     TX: Copy + Into<f64> + std::ops::Sub<Output = TX>,
+//     f64: From<TX>,
+// {
+//     pub fn fit(data: &X, n_clusters: usize) -> Result<Self, String> {
+//         let (num_samples, num_features) = data.shape();
+//         if num_samples < 2 {
+//             return Err("At least 2 samples are required for clustering.".to_string());
+//         }
+
+//         // The KdTree will only store the location (average) and a lightweight ID.
+//         let mut kdtree = KdTree::new(num_features);
+//         // The HashMap is the single source of truth for all cluster data.
+//         let mut clusters = HashMap::with_capacity(num_samples);
+        
+//         // --- Initialization ---
+//         for i in 0..num_samples {
+//             let point_data: Vec<f64> = data.get_row(i).iterator(0).map(|x| x.to_f64().unwrap()).collect();
+
+//             // Create the initial cluster.
+//             let cluster = Cluster::new(i, point_data.clone());
+
+//             // Add the cluster's location and ID to the spatial index.
+//             kdtree.add(point_data, i).unwrap();
+//             clusters.insert(i, cluster);
+//         }
+
+//         // --- Main Clustering Loop ---
+
+//         // Start with an arbitrary cluster (e.g., id 0) and its nearest neighbor.
+//         let mut a_id = 0;
+//         let a_average = clusters.get(&a_id).unwrap().average.clone();
+//         let b_results = kdtree.nearest(&a_average, 2, &squared_euclidean).unwrap();
+//         let mut b_id = *b_results[1].1;
+//         let mut clusters_len = clusters.len(); 
+
+//         while clusters_len > n_clusters {
+//             println!("{}, {}", a_id, b_id);
+//             // Find C, the nearest neighbor of B.
+//             // We clone `b_average` because the kdtree query requires an owned value or a reference.
+//             let b_average = clusters.get(&b_id).unwrap().average.clone();
+//             let c_results = kdtree.nearest(&b_average, 2, &squared_euclidean).unwrap();
+//             let mut c_id = *c_results[1].1;
+//             if c_id == b_id {
+//                 c_id =  *c_results[0].1; 
+//             } 
+//             // Check for a reciprocal best match using efficient ID comparison.
+//             if a_id == c_id {
+//                 // --- Merge B into A ---
+
+//                 // Store old average of A before it gets modified.
+//                 let old_a_average = clusters.get(&a_id).unwrap().average.clone();
+                
+//                 // Remove B from the HashMap to take ownership of it.
+//                 let b_cluster = clusters.remove(&b_id).unwrap();
+//                 clusters_len -= 1;
+//                 // Also remove B from the kdtree.
+//                 kdtree.remove(&b_cluster.average, &b_id).unwrap();
+
+//                 // Get a mutable reference to A to perform the merge.
+//                 let a_cluster_mut = clusters.get_mut(&a_id).unwrap();
+//                 // Remove the old A from the kdtree before its average changes.
+//                 kdtree.remove(&old_a_average, &a_id).unwrap();
+
+//                 // Perform the efficient, in-place merge. This consumes b_cluster.
+//                 a_cluster_mut.add_cluster(b_cluster);
+
+//                 // Add the updated cluster A back to the kdtree with its new average.
+//                 kdtree.add(a_cluster_mut.average.clone(), a_id).unwrap();
+//                 // For the next iteration, find the new nearest neighbor for our merged cluster.
+//                 if clusters_len > n_clusters {
+//                     let new_a_average = &a_cluster_mut.average;
+//                     let new_b_results = kdtree.nearest(new_a_average, 2, &squared_euclidean).unwrap();
+//                     b_id = *new_b_results[1].1;
+//                 }
+//             } else {
+//                 // Not a reciprocal match, so we "walk" to the next pair.
+//                 a_id = b_id;
+//                 b_id = c_id;
+//             }
+//             clusters_len = clusters.len();
+//         }
+//         let mut labels = vec![0; num_samples];
+
+//         for (i, (_, cluster)) in clusters.iter().enumerate() {
+//             for index in cluster.values.iter() {
+//                  labels[*index] = i;
+//             }
+//         }
+
+//         // At this point, `clusters` contains the single, final cluster.
+//         // Label assignment can be implemented here if needed.
+//         Ok(Self {
+//             labels,
+//             _phantom_tx: PhantomData,
+//             _phantom_x: PhantomData,
+//         })
+//     }
+// }
