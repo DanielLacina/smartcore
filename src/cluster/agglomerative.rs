@@ -1,6 +1,7 @@
 use core::f64;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::env::current_dir;
+use std::hash::Hash;
 use std::iter::zip;
 use std::marker::PhantomData;
 use std::usize;
@@ -72,7 +73,7 @@ impl KdTree {
         self.size
     }
 
-   pub fn insert(&mut self, row: Vec<f64>, label: usize) {
+   pub fn add(&mut self, row: Vec<f64>, label: usize) -> Rc<RefCell<KdNode>> {
     self.size += 1;
 
     // --- Case 1: The tree is empty. ---
@@ -85,8 +86,8 @@ impl KdTree {
             None, // Root has no parent
             Direction::Left, // Direction is arbitrary for the root
         )));
-        self.root = Some(root_node);
-        return;
+        self.root = Some(root_node.clone());
+        return root_node;
     }
 
     // --- Case 2: The tree is not empty. Use a loop to traverse. ---
@@ -119,7 +120,7 @@ impl KdTree {
             // A child exists in this direction, continue traversal
             current_parent_rc = next_node_rc;
         } else {
-            // No child exists. We found the insertion spot.
+            // No child exists. We found the addion spot.
             let new_node_depth = parent_depth + 1; // Correct depth calculation!
 
             // Create the new node, passing a WEAK pointer to the parent
@@ -133,12 +134,11 @@ impl KdTree {
 
             // Now get a mutable borrow on the parent to attach the new child
             if go_left {
-                current_parent_rc.borrow_mut().left = Some(new_node);
+                current_parent_rc.borrow_mut().left = Some(new_node.clone());
             } else {
-                current_parent_rc.borrow_mut().right = Some(new_node);
+                current_parent_rc.borrow_mut().right = Some(new_node.clone());
             }
-
-            break; // Insertion is complete
+            return new_node
         }
     }
 } 
@@ -287,74 +287,114 @@ impl KdTree {
     ///    successor node (the one with the minimum value in one of its subtrees),
     ///    and then the successor node is recursively removed.
     
-    pub fn remove(&mut self, node: Rc<RefCell<KdNode>>)  {
-        self.remove_node(node);
-        self.size -= 1;
-    }   
-    fn remove_node(&mut self, node: Rc<RefCell<KdNode>>) {
-        // Determine if the node is an internal node by finding a replacement.
-        // A leaf node will not have a replacement.
-        let min_node_opt = {
-            let node_ref = node.borrow();
-            // If the node has no children, it's a leaf, so no replacement search is needed.
-            if node_ref.left.is_none() && node_ref.right.is_none() {
-                None
-            } else {
-                let split_index = node_ref.depth % self.dim;
-                let mut min_value = f64::INFINITY;
-                let mut min_node = None;
+    // In your `impl KdTree`:
 
-                // Find the minimum-valued node in the subtrees to act as a replacement.
-                // The standard algorithm often prefers the right subtree, but searching both is valid.
-                if let Some(right_node) = node_ref.right.clone() {
-                    self.find_min(&mut min_node, &mut min_value, right_node, split_index);
-                }
-                if let Some(left_node) = node_ref.left.clone() {
-                    self.find_min(&mut min_node, &mut min_value, left_node, split_index);
-                }
-                min_node
-            }
-        };
+/// Removes a node from the tree and reports if any tracked data was moved.
+///
+/// # Arguments
+/// * `node_to_remove`: An `Rc` pointing to the node that should be removed.
+/// * `tracked_labels`: A set of labels the caller is "listening" for. If the data
+///   from a tracked label is swapped into a different node during removal, this
+///   function reports the change.
+///
+/// # Returns
+/// A `HashMap` mapping a tracked label to the `Rc` of the node that now holds its data.
+pub fn remove(
+    &mut self,
+    node_to_remove: Rc<RefCell<KdNode>>,
+    tracked_labels: &HashSet<usize>,
+) -> HashMap<usize, Rc<RefCell<KdNode>>> {
+    // This map will store the new locations of any tracked data that gets moved.
+    let mut swapped_locations = HashMap::new();
+    
+    // Call the recursive helper function to perform the removal.
+    self.remove_recursive(node_to_remove, &mut swapped_locations, tracked_labels);
+    
+    self.size -= 1;
+    swapped_locations
+}
 
-        if let Some(min_node) = min_node_opt {
-            // --- Case 1: The node is an internal node. ---
-            // We replace this node's data with the replacement's data, then remove the replacement.
-
-            // Scope the borrows tightly to avoid conflicts.
-            {
-                let min_node_ref = min_node.borrow();
-                let mut node_mut = node.borrow_mut();
-                // Copy data from the replacement node to the node we want to "remove".
-                node_mut.label = min_node_ref.label.clone();
-                node_mut.row = min_node_ref.row.clone();
-            } // All borrows are released here.
-
-            // Now, recursively remove the original `min_node`, which is now redundant.
-            // This is safe because no borrows are held across the recursive call.
-            self.remove_node(min_node);
+/// The private, recursive helper for node removal.
+///
+/// This function implements the "delete by copying" algorithm and handles two main cases:
+/// 1.  **Internal Node**: Finds a replacement, copies its data into the target node,
+///     and then recursively deletes the now-empty replacement node.
+/// 2.  **Leaf Node**: Simply detaches the node from its parent.
+fn remove_recursive(
+    &mut self,
+    node_to_remove: Rc<RefCell<KdNode>>,
+    swapped_locations: &mut HashMap<usize, Rc<RefCell<KdNode>>>,
+    tracked_labels: &HashSet<usize>,
+) {
+    // --- Step 1: Find a suitable replacement from a subtree. ---
+    // If no replacement is found, it means `node_to_remove` is a leaf.
+    let replacement_node_opt = {
+        let node_ref = node_to_remove.borrow();
+        if node_ref.left.is_none() && node_ref.right.is_none() {
+            None
         } else {
-            // --- Case 2: The node is a leaf. ---
-            // We detach it from its parent.
+            let split_index = node_ref.depth % self.dim;
+            let mut min_value = f64::INFINITY;
+            let mut min_node = None;
 
-            // Get the parent weak pointer and upgrade it to an Rc.
-            let parent_opt = node.borrow().parent.upgrade();
-
-            if let Some(parent_rc) = parent_opt {
-                // The node has a parent, so detach it.
-                let mut parent_mut = parent_rc.borrow_mut();
-                // Determine which child to remove (left or right).
-                let direction = node.borrow().direction_of_parent.clone();
-                match direction {
-                    Direction::Left => parent_mut.left = None,
-                    Direction::Right => parent_mut.right = None,
-                }
-            } else {
-                // The node has no parent, so it must be the root.
-                // Since it's also a leaf, deleting it means the tree is now empty.
-                self.root = None;
+            // Search both subtrees for the best possible replacement.
+            if let Some(right_node) = node_ref.right.clone() {
+                self.find_min(&mut min_node, &mut min_value, right_node, split_index);
             }
+            if let Some(left_node) = node_ref.left.clone() {
+                self.find_min(&mut min_node, &mut min_value, left_node, split_index);
+            }
+            min_node
+        }
+    };
+
+    if let Some(replacement_node) = replacement_node_opt {
+        // --- Case 1: The node is an INTERNAL NODE. ---
+        // Overwrite this node's data with the replacement's, then delete the replacement.
+        
+        // Use a tightly scoped borrow to perform the data swap safely.
+        {
+            let replacement_ref = replacement_node.borrow();
+            let mut node_to_remove_mut = node_to_remove.borrow_mut();
+
+            // --- Track Data Swaps ---
+            // If an external system is tracking the replacement node, we must report
+            // that its data has now been moved into the `node_to_remove` location.
+            if tracked_labels.contains(&replacement_ref.label) {
+                swapped_locations.insert(replacement_ref.label, node_to_remove.clone());
+            }
+
+            // Copy the replacement's data, effectively "moving" it up the tree.
+            node_to_remove_mut.label = replacement_ref.label;
+            node_to_remove_mut.row = replacement_ref.row.clone();
+        } // All borrows are released here, making the recursive call safe.
+
+        // Now, recursively call this function to remove the now-redundant
+        // replacement node from its original position.
+        self.remove_recursive(replacement_node, swapped_locations, tracked_labels);
+
+    } else {
+        // --- Case 2: The node is a LEAF. ---
+        // We can simply detach it from its parent.
+
+        // Get a strong reference to the parent, if it exists.
+        let parent_opt = node_to_remove.borrow().parent.upgrade();
+
+        if let Some(parent_rc) = parent_opt {
+            // The node has a parent, so find our node and set the parent's link to None.
+            let mut parent_mut = parent_rc.borrow_mut();
+            let direction = node_to_remove.borrow().direction_of_parent.clone();
+            match direction {
+                Direction::Left => parent_mut.left = None,
+                Direction::Right => parent_mut.right = None,
+            }
+        } else {
+            // No parent exists; this leaf node must be the root.
+            // Deleting it makes the entire tree empty.
+            self.root = None;
         }
     }
+} 
 
     /// Recursively finds the node with the minimum value along a given dimension (`split_index`)
     /// within a subtree rooted at `node`.
@@ -430,63 +470,110 @@ pub struct AgglomerativeClustering<TX, X> {
     _phantom_x: PhantomData<X>,
 }
 
-impl<TX: FloatNumber + RealNumber, X: Array2<TX>> AgglomerativeClustering<TX, X>
-{
-   pub fn fit(data: &X, n_clusters: usize) -> Result<Vec<usize>, String> {
+impl<TX: FloatNumber + RealNumber, X: Array2<TX>> AgglomerativeClustering<TX, X> {
+
+/// Performs agglomerative clustering using a reciprocal nearest neighbor strategy.
+pub fn fit(data: &X, n_clusters: usize) -> Result<Vec<usize>, String> {
     let (num_samples, num_features) = data.shape();
-    let data: Vec<Vec<f64>> = (0..num_samples).map(|i| data.get_row(i).iterator(0).map(|x| x.to_f64().unwrap()).collect::<Vec<f64>>()).collect();
     if num_samples < n_clusters {
         return Err("Number of samples must be greater than or equal to n_clusters.".to_string());
     }
+    // Convert data to a more convenient format.
+    let data: Vec<Vec<f64>> = (0..num_samples)
+        .map(|i| data.get_row(i).iterator(0).map(|x| x.to_f64().unwrap()).collect())
+        .collect();
 
     // --- 1. Initialization ---
     let mut kdtree = KdTree::new(num_features);
-    kdtree.create(data.clone(), (0..num_samples).collect());
     let mut clusters = HashMap::with_capacity(num_samples);
 
+    // Each point starts as its own cluster. We store the node pointers,
+    // though we only need them to begin the loop.
+    kdtree.create(data.clone(), (0..num_samples).collect());
     for (i, row) in data.into_iter().enumerate() {
-        // Each point starts as its own cluster. The cluster ID is the point's original index.
-        let cluster = Cluster::new(i, row.clone());
-        clusters.insert(i, cluster);
+        clusters.insert(i, Cluster::new(i, row.clone()));
     }
 
     // --- 2. Main Clustering Loop ---
-    // This loop implements the reciprocal nearest neighbors strategy.
-
-    // Start with an arbitrary cluster (id 0) and find its nearest neighbor.
-    let start_index = 0;
-    let (_, mut a_index, mut a_node) = kdtree.nearest(&clusters[&start_index].average, start_index);
-    let (_, mut b_index, mut b_node) = kdtree.nearest(&clusters[&a_index].average, a_index);
+    // The state of our search is defined by a pair of clusters (A, B), where
+    // B is the nearest neighbor of A. We check if A is also the nearest neighbor of B.
+    //
+    // A: The current cluster being evaluated.
+    // B: A's nearest neighbor.
+    // C: B's nearest neighbor.
+    
+    if num_samples <= n_clusters {
+        // No merging needed, just assign unique labels.
+        return Ok((0..num_samples).collect());
+    }
+    
+    // --- Initialize the search with a starting pair (A, B) ---
+    let mut search_index = 0;
+    let (_, mut a_index, mut a_node) = kdtree.nearest(&clusters[&search_index].average, search_index);
+    
+    // Find the true nearest neighbor to A (the 1st result is A itself).
+    let (mut distance_a_b, mut b_index, mut b_node) = kdtree.nearest(&clusters[&a_index].average, a_index);
+;
 
     while clusters.len() > n_clusters {
-        let b_average = clusters[&b_index].average.clone();
-        let (_, c_index, c_node) = kdtree.nearest(&b_average, b_index);
+        // Find C, the nearest neighbor of B.
+        let (distance_b_c, c_index, c_node) = kdtree.nearest(&clusters[&b_index].average, b_index);
         // --- Reciprocal Match Check ---
-        if a_index == c_index {
-            kdtree.remove(a_node.clone());
-            kdtree.remove(b_node.clone());
+        if distance_a_b <= distance_b_c {
+            // MERGE: A and B are mutual nearest neighbors, a strong pair to merge.
+            
+            // Step 1: Remove A, but track if B's data gets swapped into A's place.
+            // This is the most complex step. When deleting `a_node`, the k-d tree's
+            // algorithm might move the data from `b_node` into `a_node`'s memory
+            // location to fill the gap. If this happens, our `b_node` pointer is
+            // still valid, but we must update it to point to its new location
+            // before we try to remove it in the next step.
+            let mut swapped_info = kdtree.remove(a_node.clone(), &HashSet::from([b_index]));
+            if let Some(new_b_node_location) = swapped_info.remove(&b_index) {
+                b_node = new_b_node_location;
+            }
+
+            // Step 2: Now that `b_node` is guaranteed to be correct, safely remove it.
+            kdtree.remove(b_node.clone(), &HashSet::new());
+
+            // Step 3: Merge the cluster data. Let the smaller ID absorb the larger one.
             let b_cluster = clusters.remove(&b_index).unwrap();
-            let a_cluster = clusters.get_mut(&a_index).unwrap();
-            a_cluster.add_cluster(b_cluster);
-            kdtree.insert(a_cluster.average.clone(), a_index);
-            let (_, b_index_, b_node_) = kdtree.nearest(&clusters[&a_index].average, a_index);
-            b_index = b_index_;
-            b_node = b_node_;
+            let a_cluster_mut = clusters.get_mut(&a_index).unwrap();
+            a_cluster_mut.add_cluster(b_cluster);
+
+            // Step 4: Add the newly merged cluster back to the tree and get its new node pointer.
+            let new_a_node = kdtree.add(a_cluster_mut.average.clone(), a_index);
+
+            // Step 5: Update state for the next iteration.
+            // The merged cluster is our new A. Find its nearest neighbor to get the new B.
+            a_node = new_a_node;
+            let (new_distance_ab, new_b_index, new_b_node) = kdtree.nearest(&clusters[&a_index].average, a_index);
+            distance_a_b = new_distance_ab;
+            b_index = new_b_index;
+            b_node = new_b_node;
+
         } else {
+            // WALK: Not a reciprocal match. Walk along the neighbor chain.
+            // The old B becomes the new A, and its neighbor C becomes the new B.
             a_index = b_index;
             a_node = b_node;
             b_index = c_index;
             b_node = c_node;
+            distance_a_b = distance_b_c;
         }
     }
 
+    // --- 3. Final Label Assignment ---
     let mut labels = vec![0; num_samples];
-    for (final_label, (_, cluster)) in clusters.iter().enumerate() {
-        for original_point_index in cluster.values.iter() {
+    let mut cluster_indices: Vec<&usize> = clusters.keys().collect();
+    cluster_indices.sort();
+    for (final_label, cluster_index) in cluster_indices.into_iter().enumerate() {
+        let cluster = clusters.get(cluster_index).unwrap();
+        for original_point_index in &cluster.values {
             labels[*original_point_index] = final_label;
         }
     }
 
     Ok(labels)
-} 
+}
 }
