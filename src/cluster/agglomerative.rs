@@ -1,5 +1,6 @@
 use core::f64;
 use std::collections::HashMap;
+use std::env::current_dir;
 use std::iter::zip;
 use std::marker::PhantomData;
 use std::usize;
@@ -7,53 +8,66 @@ use std::usize;
 use crate::linalg::basic::arrays::{Array2, ArrayView1};
 use crate::numbers::floatnum::FloatNumber;
 use crate::numbers::realnum::RealNumber;
+use std::rc::{Rc, Weak};
+use std::cell::RefCell;
 
+#[derive(Debug)]
 pub struct KdNode {
-    left: Option<Box<KdNode>>,
-    right: Option<Box<KdNode>>,
+    left: Option<Rc<RefCell<KdNode>>>,
+    right: Option<Rc<RefCell<KdNode>>>,
+    parent: Weak<RefCell<KdNode>>,
     label: usize,
+    depth: usize,
     row: Vec<f64>,
 }
 
 impl KdNode {
-    pub fn new(row: Vec<f64>, label: usize) -> Self {
+    pub fn new(row: Vec<f64>, label: usize, depth: usize, parent: Option<Rc<RefCell<KdNode>>>) -> Self {
+        let parent = if let Some(parent) = parent {
+            Rc::downgrade(&parent)
+        }  else {
+            Weak::new()
+        };
         Self {
             left: None,
             right: None,
             row,
             label,
+            depth,
+            parent
         }
     }
 }
 
 pub struct KdTree {
     dim: usize,
-    root: Option<Box<KdNode>>,
+    root: Option<Rc<RefCell<KdNode>>>,
+    size: usize,
 }
 
 impl KdTree {
-   pub fn new(dim: usize) -> Self {
+    pub fn new(dim: usize) -> Self {
         Self {
             dim,
-            root: None
+            root: None,
+            size: 0,
         }
     }
 
-      
+    pub fn size(&self) -> usize{
+        self.size
+    }
+
     pub fn create_tree(&mut self, data: Vec<Vec<f64>>, labels: Vec<usize>) {
         // Collect into a mutable vector. The data will be partitioned in-place.
         let mut data: Vec<(Vec<f64>, usize)> =
             zip(data, labels).map(|(row, label)| (row, label)).collect();
-        
+
         // Pass a mutable slice to the recursive helper.
-        self.root = self._create_tree(&mut data, 0);
+        self.root = self._create_tree(&mut data, 0, None);
     }
 
-    fn _create_tree(
-        &self,
-        data: &mut [(Vec<f64>, usize)],
-        depth: usize,
-    ) -> Option<Box<KdNode>> {
+    fn _create_tree(&mut self, data: &mut [(Vec<f64>, usize)], depth: usize, parent: Option<Rc<RefCell<KdNode>>>) -> Option<Rc<RefCell<KdNode>>> {
         if data.is_empty() {
             return None;
         }
@@ -66,7 +80,7 @@ impl KdTree {
         data.select_nth_unstable_by(median_idx, |a, b| {
             a.0[axis].partial_cmp(&b.0[axis]).unwrap()
         });
-        
+
         // 2. Split the slice into three parts without copying memory:
         //    - The left sub-slice
         //    - The median element itself
@@ -77,92 +91,138 @@ impl KdTree {
         // The median element becomes the root of this sub-tree. We still clone it,
         // as the node needs to own its data. This is a small, necessary copy.
         let (row, label) = median_element[0].clone();
-        let mut node = KdNode::new(row, label);
-        
+        let node = Rc::new(RefCell::new(KdNode::new(row, label, depth, parent)));
+        {
         // 3. Recurse on the left and right sub-slices. No `to_vec()` needed.
-        node.left = self._create_tree(left_data, depth + 1);
-        node.right = self._create_tree(right_data, depth + 1);
+            let mut node_mut = node.borrow_mut(); 
+            node_mut.left = self._create_tree(left_data, depth + 1, Some(node.clone()));
+            node_mut.right = self._create_tree(right_data, depth + 1, Some(node.clone()));
+        }
 
-        Some(Box::new(node))
+        self.size += 1;
+        Some(node)
     }
 
-     pub fn nearest(&self, row: &Vec<f64>, label: usize) -> (f64, usize) {
-        let root_node = match self.root.as_ref() {
-            Some(node) => node,
-            // If the tree is empty, return a sentinel value.
-            None => return (f64::MAX, usize::MAX),
-        };
-
+    pub fn nearest(&mut self, row: &Vec<f64>, label: usize) -> (f64, usize, Rc<RefCell<KdNode>>) {
         // Initialize with the root node's data.
-        let mut min_distance_sq = zip(root_node.row.iter(), row.iter())
-            .map(|(v, x)| (v - x).powi(2))
-            .sum();
-        let mut min_label = root_node.label;
+        let mut min_distance_sq = f64::INFINITY; 
+        let mut min_label = usize::MAX; 
+
+        let mut min_node = None;
 
         // Start the recursive search.
         self.search_recursive(
-            root_node,
+            self.root.clone().unwrap(),
             row,
             label,
-            0, // initial depth
             &mut min_distance_sq,
             &mut min_label,
+            &mut min_node
         );
 
-        (min_distance_sq, min_label)
+        (f64::sqrt(min_distance_sq), min_label, min_node.unwrap())
     }
 
     /// Private recursive helper for the nearest neighbor search.
     fn search_recursive(
         &self,
-        node: &KdNode,
+        node: Rc<RefCell<KdNode>>,
         row: &Vec<f64>,
         label: usize,
-        depth: usize,
         min_distance_sq: &mut f64,
         min_label: &mut usize,
+        min_node: &mut Option<Rc<RefCell<KdNode>>>
     ) {
         // 1. Determine which branch is primary (closer to the query point)
         //    and which is secondary.
-        let i = depth % self.dim;
-        let (primary_child, secondary_child) = if row[i] <= node.row[i] {
-            (&node.left, &node.right)
-        } else {
-            (&node.right, &node.left)
+        let parent_node = node.borrow();
+        let i = parent_node.depth % self.dim;
+        let (primary_child, secondary_child) =
+        {
+            let left_node = parent_node.left.clone();   
+            let right_node = parent_node.right.clone();
+            if row[i] <= parent_node.row[i] {
+                (left_node, right_node)
+            } else {
+                (right_node, left_node)
+            }
         };
 
         // 2. Recurse down the primary branch first.
         //    This will explore the most promising path to the bottom of the tree.
         if let Some(child) = primary_child {
-            self.search_recursive(child, row, label, depth + 1, min_distance_sq, min_label);
+            self.search_recursive(
+                child,
+                row,
+                label,
+                min_distance_sq,
+                min_label,
+                min_node
+            );
         }
 
         // 4. Check the secondary branch.
         //    We only explore this branch if it's possible it could contain a
         //    closer point. This is the core optimization of the k-d tree.
-        let perp_distance_sq = (node.row[i] - row[i]).powi(2);
+        let perp_distance_sq = (parent_node.row[i] - row[i]).powi(2);
 
         // This is the "ball within bounds" check. If the squared perpendicular
         // distance to the splitting plane is less than our current best squared
         // distance, the hypersphere around our query point intersects the plane,
         // so we must explore the other side.
         if perp_distance_sq < *min_distance_sq {
-            if label != node.label {
-                let distance_sq: f64 = zip(node.row.iter(), row.iter())
+            if label != parent_node.label {
+                let distance_sq: f64 = zip(parent_node.row.iter(), row.iter())
                     .map(|(v, x)| (v - x).powi(2))
                     .sum();
-                
+
                 if distance_sq < *min_distance_sq {
                     *min_distance_sq = distance_sq;
-                    *min_label = node.label;
+                    *min_label = parent_node.label;
+                    *min_node = Some(node.clone());
                 }
             }
             if let Some(child) = secondary_child {
-                self.search_recursive(child, row, label, depth + 1, min_distance_sq, min_label);
+                self.search_recursive(
+                    child,
+                    row,
+                    label,
+                    min_distance_sq,
+                    min_label,
+                    min_node
+                );
             }
         }
     }
-} 
+
+    // pub fn delete(&mut self, node: Rc<RefCell<KdNode>>) {
+    //     let depth = node.borrow().depth % self.dim;
+    //     let mut min_value = f64::INFINITY;
+    //     let mut min_node = None;
+    //     self.find_min(min_node, &mut min_value, node, split_index);
+    //     if self.dim > 1 {
+            
+    //     }
+    // }
+
+    // pub fn find_min(&self, min_node: &mut Option<Rc<RefCell<KdNode>>>, min_value: &mut f64, node: Rc<RefCell<KdNode>>, split_index: usize) {
+    //     let parent_node = node.borrow();
+    //     let cur_split_index = parent_node.depth % self.dim;
+    //     if let Some(left_node) = parent_node.left.clone() {
+    //         self.find_min(min_node, min_value, left_node, split_index);
+    //     }
+    //     if cur_split_index != split_index {
+    //         if let Some(right_node) = parent_node.right.clone() {
+    //             self.find_min(min_node, min_value, right_node, split_index);
+    //         }
+    //     }
+    //     let parent_node_value = parent_node.row[split_index];
+    //     if parent_node_value < *min_value {
+    //         *min_value = parent_node_value;
+    //         *min_node = Some(node.clone());
+    //     }
+    // }
+}
 
 // // The Cluster struct no longer needs PartialEq as we will use IDs for comparison.
 // // Clone is kept for convenience, but the main loop avoids using it.
