@@ -8,33 +8,47 @@ use std::usize;
 use crate::linalg::basic::arrays::{Array2, ArrayView1};
 use crate::numbers::floatnum::FloatNumber;
 use crate::numbers::realnum::RealNumber;
-use std::rc::{Rc, Weak};
 use std::cell::RefCell;
+use std::rc::{Rc, Weak};
+
+#[derive(Debug, Clone)]
+pub enum Direction {
+    Left,
+    Right,
+}
 
 #[derive(Debug)]
 pub struct KdNode {
     left: Option<Rc<RefCell<KdNode>>>,
     right: Option<Rc<RefCell<KdNode>>>,
     parent: Weak<RefCell<KdNode>>,
+    direction_of_parent: Direction,
     label: usize,
     depth: usize,
     row: Vec<f64>,
 }
 
 impl KdNode {
-    pub fn new(row: Vec<f64>, label: usize, depth: usize, parent: Option<Rc<RefCell<KdNode>>>) -> Self {
+    pub fn new(
+        row: Vec<f64>,
+        label: usize,
+        depth: usize,
+        parent: Option<Rc<RefCell<KdNode>>>,
+        direction_of_parent: Direction,
+    ) -> Self {
         let parent = if let Some(parent) = parent {
             Rc::downgrade(&parent)
-        }  else {
+        } else {
             Weak::new()
         };
         Self {
             left: None,
             right: None,
+            direction_of_parent,
             row,
             label,
             depth,
-            parent
+            parent,
         }
     }
 }
@@ -54,7 +68,7 @@ impl KdTree {
         }
     }
 
-    pub fn size(&self) -> usize{
+    pub fn size(&self) -> usize {
         self.size
     }
 
@@ -64,10 +78,16 @@ impl KdTree {
             zip(data, labels).map(|(row, label)| (row, label)).collect();
 
         // Pass a mutable slice to the recursive helper.
-        self.root = self._create_tree(&mut data, 0, None);
+        self.root = self._create_tree(&mut data, 0, None, Direction::Left);
     }
 
-    fn _create_tree(&mut self, data: &mut [(Vec<f64>, usize)], depth: usize, parent: Option<Rc<RefCell<KdNode>>>) -> Option<Rc<RefCell<KdNode>>> {
+    fn _create_tree(
+        &mut self,
+        data: &mut [(Vec<f64>, usize)],
+        depth: usize,
+        parent: Option<Rc<RefCell<KdNode>>>,
+        direction_of_parent: Direction,
+    ) -> Option<Rc<RefCell<KdNode>>> {
         if data.is_empty() {
             return None;
         }
@@ -91,12 +111,20 @@ impl KdTree {
         // The median element becomes the root of this sub-tree. We still clone it,
         // as the node needs to own its data. This is a small, necessary copy.
         let (row, label) = median_element[0].clone();
-        let node = Rc::new(RefCell::new(KdNode::new(row, label, depth, parent)));
+        let node = Rc::new(RefCell::new(KdNode::new(
+            row,
+            label,
+            depth,
+            parent,
+            direction_of_parent,
+        )));
         {
-        // 3. Recurse on the left and right sub-slices. No `to_vec()` needed.
-            let mut node_mut = node.borrow_mut(); 
-            node_mut.left = self._create_tree(left_data, depth + 1, Some(node.clone()));
-            node_mut.right = self._create_tree(right_data, depth + 1, Some(node.clone()));
+            // 3. Recurse on the left and right sub-slices. No `to_vec()` needed.
+            let mut node_mut = node.borrow_mut();
+            node_mut.left =
+                self._create_tree(left_data, depth + 1, Some(node.clone()), Direction::Left);
+            node_mut.right =
+                self._create_tree(right_data, depth + 1, Some(node.clone()), Direction::Right);
         }
 
         self.size += 1;
@@ -105,8 +133,8 @@ impl KdTree {
 
     pub fn nearest(&mut self, row: &Vec<f64>, label: usize) -> (f64, usize, Rc<RefCell<KdNode>>) {
         // Initialize with the root node's data.
-        let mut min_distance_sq = f64::INFINITY; 
-        let mut min_label = usize::MAX; 
+        let mut min_distance_sq = f64::INFINITY;
+        let mut min_label = usize::MAX;
 
         let mut min_node = None;
 
@@ -117,7 +145,7 @@ impl KdTree {
             label,
             &mut min_distance_sq,
             &mut min_label,
-            &mut min_node
+            &mut min_node,
         );
 
         (f64::sqrt(min_distance_sq), min_label, min_node.unwrap())
@@ -131,15 +159,14 @@ impl KdTree {
         label: usize,
         min_distance_sq: &mut f64,
         min_label: &mut usize,
-        min_node: &mut Option<Rc<RefCell<KdNode>>>
+        min_node: &mut Option<Rc<RefCell<KdNode>>>,
     ) {
         // 1. Determine which branch is primary (closer to the query point)
         //    and which is secondary.
         let parent_node = node.borrow();
         let i = parent_node.depth % self.dim;
-        let (primary_child, secondary_child) =
-        {
-            let left_node = parent_node.left.clone();   
+        let (primary_child, secondary_child) = {
+            let left_node = parent_node.left.clone();
             let right_node = parent_node.right.clone();
             if row[i] <= parent_node.row[i] {
                 (left_node, right_node)
@@ -151,14 +178,7 @@ impl KdTree {
         // 2. Recurse down the primary branch first.
         //    This will explore the most promising path to the bottom of the tree.
         if let Some(child) = primary_child {
-            self.search_recursive(
-                child,
-                row,
-                label,
-                min_distance_sq,
-                min_label,
-                min_node
-            );
+            self.search_recursive(child, row, label, min_distance_sq, min_label, min_node);
         }
 
         // 4. Check the secondary branch.
@@ -183,45 +203,114 @@ impl KdTree {
                 }
             }
             if let Some(child) = secondary_child {
-                self.search_recursive(
-                    child,
-                    row,
-                    label,
-                    min_distance_sq,
-                    min_label,
-                    min_node
-                );
+                self.search_recursive(child, row, label, min_distance_sq, min_label, min_node);
             }
         }
     }
 
-    // pub fn delete(&mut self, node: Rc<RefCell<KdNode>>) {
-    //     let depth = node.borrow().depth % self.dim;
-    //     let mut min_value = f64::INFINITY;
-    //     let mut min_node = None;
-    //     self.find_min(min_node, &mut min_value, node, split_index);
-    //     if self.dim > 1 {
-            
-    //     }
-    // }
+    ///
+    /// This function handles three cases:
+    /// 1. The node is a leaf: It is detached from its parent.
+    /// 2. The node is the root and also a leaf: The tree becomes empty.
+    /// 3. The node is an internal node: Its data is replaced by the data of a suitable
+    ///    successor node (the one with the minimum value in one of its subtrees),
+    ///    and then the successor node is recursively deleted.
+    
+    pub fn delete(&mut self, node: Rc<RefCell<KdNode>>)  {
+        self.delete_node(node);
+        self.size -= 1;
+    }   
+    fn delete_node(&mut self, node: Rc<RefCell<KdNode>>) {
+        // Determine if the node is an internal node by finding a replacement.
+        // A leaf node will not have a replacement.
+        let min_node_opt = {
+            let node_ref = node.borrow();
+            // If the node has no children, it's a leaf, so no replacement search is needed.
+            if node_ref.left.is_none() && node_ref.right.is_none() {
+                None
+            } else {
+                let split_index = node_ref.depth % self.dim;
+                let mut min_value = f64::INFINITY;
+                let mut min_node = None;
 
-    // pub fn find_min(&self, min_node: &mut Option<Rc<RefCell<KdNode>>>, min_value: &mut f64, node: Rc<RefCell<KdNode>>, split_index: usize) {
-    //     let parent_node = node.borrow();
-    //     let cur_split_index = parent_node.depth % self.dim;
-    //     if let Some(left_node) = parent_node.left.clone() {
-    //         self.find_min(min_node, min_value, left_node, split_index);
-    //     }
-    //     if cur_split_index != split_index {
-    //         if let Some(right_node) = parent_node.right.clone() {
-    //             self.find_min(min_node, min_value, right_node, split_index);
-    //         }
-    //     }
-    //     let parent_node_value = parent_node.row[split_index];
-    //     if parent_node_value < *min_value {
-    //         *min_value = parent_node_value;
-    //         *min_node = Some(node.clone());
-    //     }
-    // }
+                // Find the minimum-valued node in the subtrees to act as a replacement.
+                // The standard algorithm often prefers the right subtree, but searching both is valid.
+                if let Some(right_node) = node_ref.right.clone() {
+                    self.find_min(&mut min_node, &mut min_value, right_node, split_index);
+                }
+                if let Some(left_node) = node_ref.left.clone() {
+                    self.find_min(&mut min_node, &mut min_value, left_node, split_index);
+                }
+                min_node
+            }
+        };
+
+        if let Some(min_node) = min_node_opt {
+            // --- Case 1: The node is an internal node. ---
+            // We replace this node's data with the replacement's data, then delete the replacement.
+
+            // Scope the borrows tightly to avoid conflicts.
+            {
+                let min_node_ref = min_node.borrow();
+                let mut node_mut = node.borrow_mut();
+                // Copy data from the replacement node to the node we want to "delete".
+                node_mut.label = min_node_ref.label.clone();
+                node_mut.row = min_node_ref.row.clone();
+            } // All borrows are released here.
+
+            // Now, recursively delete the original `min_node`, which is now redundant.
+            // This is safe because no borrows are held across the recursive call.
+            self.delete_node(min_node);
+        } else {
+            // --- Case 2: The node is a leaf. ---
+            // We detach it from its parent.
+
+            // Get the parent weak pointer and upgrade it to an Rc.
+            let parent_opt = node.borrow().parent.upgrade();
+
+            if let Some(parent_rc) = parent_opt {
+                // The node has a parent, so detach it.
+                let mut parent_mut = parent_rc.borrow_mut();
+                // Determine which child to remove (left or right).
+                let direction = node.borrow().direction_of_parent.clone();
+                match direction {
+                    Direction::Left => parent_mut.left = None,
+                    Direction::Right => parent_mut.right = None,
+                }
+            } else {
+                // The node has no parent, so it must be the root.
+                // Since it's also a leaf, deleting it means the tree is now empty.
+                self.root = None;
+            }
+        }
+    }
+
+    /// Recursively finds the node with the minimum value along a given dimension (`split_index`)
+    /// within a subtree rooted at `node`.
+    pub fn find_min(
+        &self,
+        min_node: &mut Option<Rc<RefCell<KdNode>>>,
+        min_value: &mut f64,
+        node: Rc<RefCell<KdNode>>,
+        split_index: usize,
+    ) {
+        let node_ref = node.borrow();
+
+        // Check the current node's value.
+        let parent_node_value = node_ref.row[split_index];
+        if parent_node_value < *min_value {
+            *min_value = parent_node_value;
+            *min_node = Some(node.clone());
+        }
+
+        // To find the true minimum, we must search the entire subtree unconditionally.
+        if let Some(left_node) = node_ref.left.clone() {
+            self.find_min(min_node, min_value, left_node, split_index);
+        }
+        if let Some(right_node) = node_ref.right.clone() {
+            self.find_min(min_node, min_value, right_node, split_index);
+        }
+    }
 }
 
 // // The Cluster struct no longer needs PartialEq as we will use IDs for comparison.
