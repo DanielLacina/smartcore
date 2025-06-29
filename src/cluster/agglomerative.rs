@@ -72,6 +72,32 @@ impl KdTree {
         self.size
     }
 
+    pub fn insert(&mut self, row: Vec<f64>, label: usize) {
+        self.size += 1; 
+        if self.root.is_none() {
+           self.root = Some(Rc::new(RefCell::new(KdNode::new(row, label, 0, None, Direction::Left))));
+           return;
+        }
+        self.insert_row(self.root.clone().unwrap(), row, label,  0);
+    } 
+    fn insert_row(&mut self, node: Rc<RefCell<KdNode>>, row: Vec<f64>, label: usize, depth: usize) {
+        let axis = depth % self.dim; 
+        let mut node_mut = node.borrow_mut();
+        if row[axis] < node_mut.row[axis] {
+            if let Some(left_node) = node_mut.left.clone() {
+                self.insert_row(left_node, row,  label, depth + 1);
+            } else {
+                node_mut.left = Some(Rc::new(RefCell::new(KdNode::new(row, label, depth, Some(node.clone()), Direction::Left))));
+            }
+        } else {
+            if let Some(right_node) = node_mut.right.clone() {
+                self.insert_row(right_node, row,  label, depth + 1);
+            } else {
+                node_mut.right = Some(Rc::new(RefCell::new(KdNode::new(row, label, depth, Some(node.clone()), Direction::Right))));
+            }
+        }
+    }  
+
     pub fn create_tree(&mut self, data: Vec<Vec<f64>>, labels: Vec<usize>) {
         // Collect into a mutable vector. The data will be partitioned in-place.
         let mut data: Vec<(Vec<f64>, usize)> =
