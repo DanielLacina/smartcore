@@ -2,17 +2,17 @@ use core::f64;
 use std::collections::HashMap;
 use std::iter::zip;
 use std::marker::PhantomData;
+use std::usize;
 
 use crate::linalg::basic::arrays::{Array2, ArrayView1};
 use crate::numbers::floatnum::FloatNumber;
 use crate::numbers::realnum::RealNumber;
 
-
 pub struct KdNode {
     left: Option<Box<KdNode>>,
     right: Option<Box<KdNode>>,
     label: usize,
-    row: Vec<f64>
+    row: Vec<f64>,
 }
 
 impl KdNode {
@@ -21,86 +21,148 @@ impl KdNode {
             left: None,
             right: None,
             row,
-            label
+            label,
         }
-
     }
 }
 
 pub struct KdTree {
     dim: usize,
-    root: Option<Box<KdNode>>
+    root: Option<Box<KdNode>>,
 }
 
 impl KdTree {
-    pub fn new(dim: usize) -> Self {
+   pub fn new(dim: usize) -> Self {
         Self {
             dim,
             root: None
         }
     }
 
+      
     pub fn create_tree(&mut self, data: Vec<Vec<f64>>, labels: Vec<usize>) {
-        let data: Vec<(Vec<f64>, usize)> = zip(data, labels).map(|(row, label)| (row, label)).collect();
-        self.root = self._create_tree(data, 0); 
-
+        // Collect into a mutable vector. The data will be partitioned in-place.
+        let mut data: Vec<(Vec<f64>, usize)> =
+            zip(data, labels).map(|(row, label)| (row, label)).collect();
+        
+        // Pass a mutable slice to the recursive helper.
+        self.root = self._create_tree(&mut data, 0);
     }
 
-    fn _create_tree(&self, data: Vec<(Vec<f64>, usize)>, depth: usize) -> Option<Box<KdNode>> {
-        let i = depth % self.dim;  
-        if data.len() == 0 {
+    fn _create_tree(
+        &self,
+        data: &mut [(Vec<f64>, usize)],
+        depth: usize,
+    ) -> Option<Box<KdNode>> {
+        if data.is_empty() {
             return None;
         }
-        let mut data = data;
-        data.sort_by(|a, b| a.0[i].partial_cmp(&b.0[i]).unwrap());
-        let median = data.len()/2;
-        let (row, label) = data[median].clone();
-        let mut root = KdNode::new(row, label);
-        root.left = self._create_tree(data[0..median].to_vec(), depth + 1);
-        root.right = self._create_tree(data[median + 1..data.len()].to_vec(), depth + 1);
-        Some(Box::new(root))
-    } 
 
-    pub fn nearest(&self, data: &Vec<f64>, label:  usize) -> (f64, usize) {
-        let root = self.root.as_ref().unwrap();
-        let (min_distance, label) = self._nearest(root, data, label, 0);
-        (f64::sqrt(min_distance), label.unwrap())
+        let axis = depth % self.dim;
+        let median_idx = data.len() / 2;
+
+        // 1. Partition the slice in-place to find the median along the current axis.
+        //    This is O(n) on average, much faster than a full O(n log n) sort.
+        data.select_nth_unstable_by(median_idx, |a, b| {
+            a.0[axis].partial_cmp(&b.0[axis]).unwrap()
+        });
+        
+        // 2. Split the slice into three parts without copying memory:
+        //    - The left sub-slice
+        //    - The median element itself
+        //    - The right sub-slice
+        let (left_data, rest) = data.split_at_mut(median_idx);
+        let (median_element, right_data) = rest.split_at_mut(1);
+
+        // The median element becomes the root of this sub-tree. We still clone it,
+        // as the node needs to own its data. This is a small, necessary copy.
+        let (row, label) = median_element[0].clone();
+        let mut node = KdNode::new(row, label);
+        
+        // 3. Recurse on the left and right sub-slices. No `to_vec()` needed.
+        node.left = self._create_tree(left_data, depth + 1);
+        node.right = self._create_tree(right_data, depth + 1);
+
+        Some(Box::new(node))
     }
 
-    fn _nearest(&self, node: &Box<KdNode>, row: &Vec<f64>, label: usize, depth: usize) -> (f64, Option<usize>) {
+     pub fn nearest(&self, row: &Vec<f64>, label: usize) -> (f64, usize) {
+        let root_node = match self.root.as_ref() {
+            Some(node) => node,
+            // If the tree is empty, return a sentinel value.
+            None => return (f64::MAX, usize::MAX),
+        };
+
+        // Initialize with the root node's data.
+        let mut min_distance_sq = zip(root_node.row.iter(), row.iter())
+            .map(|(v, x)| (v - x).powi(2))
+            .sum();
+        let mut min_label = root_node.label;
+
+        // Start the recursive search.
+        self.search_recursive(
+            root_node,
+            row,
+            label,
+            0, // initial depth
+            &mut min_distance_sq,
+            &mut min_label,
+        );
+
+        (min_distance_sq, min_label)
+    }
+
+    /// Private recursive helper for the nearest neighbor search.
+    fn search_recursive(
+        &self,
+        node: &KdNode,
+        row: &Vec<f64>,
+        label: usize,
+        depth: usize,
+        min_distance_sq: &mut f64,
+        min_label: &mut usize,
+    ) {
+        // 1. Determine which branch is primary (closer to the query point)
+        //    and which is secondary.
         let i = depth % self.dim;
-        let (primary_node, secondary_node) = if row[i] <= node.row[i] {
-           (&node.left, &node.right)
+        let (primary_child, secondary_child) = if row[i] <= node.row[i] {
+            (&node.left, &node.right)
         } else {
             (&node.right, &node.left)
         };
-        let mut min_label = None;
-        let mut min_distance = f64::INFINITY;
-        if let Some(primary_node) = primary_node {
-             (min_distance, min_label) = self._nearest(primary_node, row, label, depth + 1);
-        }
-        let perp_distance = f64::abs(node.row[i] - row[i]);
-        if perp_distance < min_distance {
-             if node.label != label {
-                let distance_to_node: f64 = zip(node.row.iter(), row.iter()).map(|(v, x)| (v - x).powf(2.0)).sum();
-                if distance_to_node < min_distance {
-                    min_distance = distance_to_node;
-                    min_label = Some(node.label); 
-                }
-            }
-            if let Some(secondary_node) = secondary_node {
-                let (secondary_distance, secondary_label) = self._nearest(secondary_node, row, label, depth + 1); 
-                if secondary_distance < min_distance {
-                    min_distance = secondary_distance;
-                    min_label = secondary_label;
-                }
-            }
-        }
-        (min_distance, min_label)
 
+        // 2. Recurse down the primary branch first.
+        //    This will explore the most promising path to the bottom of the tree.
+        if let Some(child) = primary_child {
+            self.search_recursive(child, row, label, depth + 1, min_distance_sq, min_label);
+        }
+
+        // 4. Check the secondary branch.
+        //    We only explore this branch if it's possible it could contain a
+        //    closer point. This is the core optimization of the k-d tree.
+        let perp_distance_sq = (node.row[i] - row[i]).powi(2);
+
+        // This is the "ball within bounds" check. If the squared perpendicular
+        // distance to the splitting plane is less than our current best squared
+        // distance, the hypersphere around our query point intersects the plane,
+        // so we must explore the other side.
+        if perp_distance_sq < *min_distance_sq {
+            if label != node.label {
+                let distance_sq: f64 = zip(node.row.iter(), row.iter())
+                    .map(|(v, x)| (v - x).powi(2))
+                    .sum();
+                
+                if distance_sq < *min_distance_sq {
+                    *min_distance_sq = distance_sq;
+                    *min_label = node.label;
+                }
+            }
+            if let Some(child) = secondary_child {
+                self.search_recursive(child, row, label, depth + 1, min_distance_sq, min_label);
+            }
+        }
     }
-    
- } 
+} 
 
 // // The Cluster struct no longer needs PartialEq as we will use IDs for comparison.
 // // Clone is kept for convenience, but the main loop avoids using it.
@@ -162,7 +224,7 @@ impl KdTree {
 //         let mut kdtree = KdTree::new(num_features);
 //         // The HashMap is the single source of truth for all cluster data.
 //         let mut clusters = HashMap::with_capacity(num_samples);
-        
+
 //         // --- Initialization ---
 //         for i in 0..num_samples {
 //             let point_data: Vec<f64> = data.get_row(i).iterator(0).map(|x| x.to_f64().unwrap().collect());
@@ -182,7 +244,7 @@ impl KdTree {
 //         let a_average = clusters.get(&a_id).unwrap().average.clone();
 //         let b_results = kdtree.nearest(&a_average, 2, &squared_euclidean).unwrap();
 //         let mut b_id = *b_results[1].1;
-//         let mut clusters_len = clusters.len(); 
+//         let mut clusters_len = clusters.len();
 
 //         while clusters_len > n_clusters {
 //             println!("{}, {}", a_id, b_id);
@@ -192,15 +254,15 @@ impl KdTree {
 //             let c_results = kdtree.nearest(&b_average, 2, &squared_euclidean).unwrap();
 //             let mut c_id = *c_results[1].1;
 //             if c_id == b_id {
-//                 c_id =  *c_results[0].1; 
-//             } 
+//                 c_id =  *c_results[0].1;
+//             }
 //             // Check for a reciprocal best match using efficient ID comparison.
 //             if a_id == c_id {
 //                 // --- Merge B into A ---
 
 //                 // Store old average of A before it gets modified.
 //                 let old_a_average = clusters.get(&a_id).unwrap().average.clone();
-                
+
 //                 // Remove B from the HashMap to take ownership of it.
 //                 let b_cluster = clusters.remove(&b_id).unwrap();
 //                 clusters_len -= 1;
