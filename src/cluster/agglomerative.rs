@@ -72,42 +72,87 @@ impl KdTree {
         self.size
     }
 
-    pub fn insert(&mut self, row: Vec<f64>, label: usize) {
-        self.size += 1; 
-        if self.root.is_none() {
-           self.root = Some(Rc::new(RefCell::new(KdNode::new(row, label, 0, None, Direction::Left))));
-           return;
-        }
-        self.insert_row(self.root.clone().unwrap(), row, label,  0);
-    } 
-    fn insert_row(&mut self, node: Rc<RefCell<KdNode>>, row: Vec<f64>, label: usize, depth: usize) {
-        let axis = depth % self.dim; 
-        let mut node_mut = node.borrow_mut();
-        if row[axis] < node_mut.row[axis] {
-            if let Some(left_node) = node_mut.left.clone() {
-                self.insert_row(left_node, row,  label, depth + 1);
-            } else {
-                node_mut.left = Some(Rc::new(RefCell::new(KdNode::new(row, label, depth, Some(node.clone()), Direction::Left))));
-            }
-        } else {
-            if let Some(right_node) = node_mut.right.clone() {
-                self.insert_row(right_node, row,  label, depth + 1);
-            } else {
-                node_mut.right = Some(Rc::new(RefCell::new(KdNode::new(row, label, depth, Some(node.clone()), Direction::Right))));
-            }
-        }
-    }  
+   pub fn insert(&mut self, row: Vec<f64>, label: usize) {
+    self.size += 1;
 
-    pub fn create_tree(&mut self, data: Vec<Vec<f64>>, labels: Vec<usize>) {
+    // --- Case 1: The tree is empty. ---
+    if self.root.is_none() {
+        // Create the root node with the correct constructor
+        let root_node = Rc::new(RefCell::new(KdNode::new(
+            row,
+            label,
+            0, // Root depth is 0
+            None, // Root has no parent
+            Direction::Left, // Direction is arbitrary for the root
+        )));
+        self.root = Some(root_node);
+        return;
+    }
+
+    // --- Case 2: The tree is not empty. Use a loop to traverse. ---
+    let mut current_parent_rc = self.root.as_ref().unwrap().clone();
+
+    loop {
+        let parent_depth;
+        let parent_value;
+        let split_index;
+
+        // Scope the immutable borrow to be as short as possible
+        {
+            let parent_ref = current_parent_rc.borrow();
+            parent_depth = parent_ref.depth;
+            split_index = parent_depth % self.dim;
+            parent_value = parent_ref.row[split_index];
+        } // `parent_ref` is dropped here, releasing the borrow
+
+        let new_value = row[split_index];
+        let go_left = new_value < parent_value;
+
+        // Check if the appropriate child node exists
+        let next_node_opt = if go_left {
+            current_parent_rc.borrow().left.clone()
+        } else {
+            current_parent_rc.borrow().right.clone()
+        };
+
+        if let Some(next_node_rc) = next_node_opt {
+            // A child exists in this direction, continue traversal
+            current_parent_rc = next_node_rc;
+        } else {
+            // No child exists. We found the insertion spot.
+            let new_node_depth = parent_depth + 1; // Correct depth calculation!
+
+            // Create the new node, passing a WEAK pointer to the parent
+            let new_node = Rc::new(RefCell::new(KdNode::new(
+                row,
+                label,
+                new_node_depth,
+                Some(current_parent_rc.clone()), // The crucial change!
+                if go_left { Direction::Left } else { Direction::Right },
+            )));
+
+            // Now get a mutable borrow on the parent to attach the new child
+            if go_left {
+                current_parent_rc.borrow_mut().left = Some(new_node);
+            } else {
+                current_parent_rc.borrow_mut().right = Some(new_node);
+            }
+
+            break; // Insertion is complete
+        }
+    }
+} 
+
+    pub fn create(&mut self, data: Vec<Vec<f64>>, labels: Vec<usize>) {
         // Collect into a mutable vector. The data will be partitioned in-place.
         let mut data: Vec<(Vec<f64>, usize)> =
             zip(data, labels).map(|(row, label)| (row, label)).collect();
 
         // Pass a mutable slice to the recursive helper.
-        self.root = self._create_tree(&mut data, 0, None, Direction::Left);
+        self.root = self.create_tree(&mut data, 0, None, Direction::Left);
     }
 
-    fn _create_tree(
+    fn create_tree(
         &mut self,
         data: &mut [(Vec<f64>, usize)],
         depth: usize,
@@ -148,9 +193,9 @@ impl KdTree {
             // 3. Recurse on the left and right sub-slices. No `to_vec()` needed.
             let mut node_mut = node.borrow_mut();
             node_mut.left =
-                self._create_tree(left_data, depth + 1, Some(node.clone()), Direction::Left);
+                self.create_tree(left_data, depth + 1, Some(node.clone()), Direction::Left);
             node_mut.right =
-                self._create_tree(right_data, depth + 1, Some(node.clone()), Direction::Right);
+                self.create_tree(right_data, depth + 1, Some(node.clone()), Direction::Right);
         }
 
         self.size += 1;
@@ -240,13 +285,13 @@ impl KdTree {
     /// 2. The node is the root and also a leaf: The tree becomes empty.
     /// 3. The node is an internal node: Its data is replaced by the data of a suitable
     ///    successor node (the one with the minimum value in one of its subtrees),
-    ///    and then the successor node is recursively deleted.
+    ///    and then the successor node is recursively removed.
     
-    pub fn delete(&mut self, node: Rc<RefCell<KdNode>>)  {
-        self.delete_node(node);
+    pub fn remove(&mut self, node: Rc<RefCell<KdNode>>)  {
+        self.remove_node(node);
         self.size -= 1;
     }   
-    fn delete_node(&mut self, node: Rc<RefCell<KdNode>>) {
+    fn remove_node(&mut self, node: Rc<RefCell<KdNode>>) {
         // Determine if the node is an internal node by finding a replacement.
         // A leaf node will not have a replacement.
         let min_node_opt = {
@@ -273,20 +318,20 @@ impl KdTree {
 
         if let Some(min_node) = min_node_opt {
             // --- Case 1: The node is an internal node. ---
-            // We replace this node's data with the replacement's data, then delete the replacement.
+            // We replace this node's data with the replacement's data, then remove the replacement.
 
             // Scope the borrows tightly to avoid conflicts.
             {
                 let min_node_ref = min_node.borrow();
                 let mut node_mut = node.borrow_mut();
-                // Copy data from the replacement node to the node we want to "delete".
+                // Copy data from the replacement node to the node we want to "remove".
                 node_mut.label = min_node_ref.label.clone();
                 node_mut.row = min_node_ref.row.clone();
             } // All borrows are released here.
 
-            // Now, recursively delete the original `min_node`, which is now redundant.
+            // Now, recursively remove the original `min_node`, which is now redundant.
             // This is safe because no borrows are held across the recursive call.
-            self.delete_node(min_node);
+            self.remove_node(min_node);
         } else {
             // --- Case 2: The node is a leaf. ---
             // We detach it from its parent.
@@ -339,148 +384,109 @@ impl KdTree {
     }
 }
 
-// // The Cluster struct no longer needs PartialEq as we will use IDs for comparison.
-// // Clone is kept for convenience, but the main loop avoids using it.
-// #[derive(Clone, Debug)]
-// pub struct Cluster {
-//     sum: Vec<f64>,
-//     average: Vec<f64>,
-//     /// Contains the indices of the original data points belonging to this cluster.
-//     values: Vec<usize>,
-// }
+// The Cluster struct no longer needs PartialEq as we will use IDs for comparison.
+// Clone is kept for convenience, but the main loop avoids using it.
+#[derive(Clone, Debug)]
+pub struct Cluster {
+    sum: Vec<f64>,
+    average: Vec<f64>,
+    /// Contains the indices of the original data points belonging to this cluster.
+    values: Vec<usize>,
+}
 
-// impl Cluster {
-//     /// Creates a new cluster from a single data point.
-//     pub fn new(point_index: usize, data: Vec<f64>) -> Self {
-//         Self {
-//             sum: data.clone(),
-//             average: data,
-//             values: vec![point_index],
-//         }
-//     }
+impl Cluster {
+    /// Creates a new cluster from a single data point.
+    pub fn new(point_index: usize, data: Vec<f64>) -> Self {
+        Self {
+            sum: data.clone(),
+            average: data,
+            values: vec![point_index],
+        }
+    }
 
-//     /// Merges another cluster into this one efficiently.
-//     /// This method now takes ownership of `other` to avoid cloning its internal vectors.
-//     /// It also performs calculations in-place to prevent new memory allocations.
-//     pub fn add_cluster(&mut self, mut other: Cluster) {
-//         // Extend the list of point indices. append is O(1).
-//         self.values.append(&mut other.values);
+    /// Merges another cluster into this one efficiently.
+    /// This method now takes ownership of `other` to avoid cloning its internal vectors.
+    /// It also performs calculations in-place to prevent new memory allocations.
+    pub fn add_cluster(&mut self, mut other: Cluster) {
+        // Extend the list of point indices. append is O(1).
+        self.values.append(&mut other.values);
 
-//         // Update the sum of all points' coordinates in-place.
-//         for (s_val, o_val) in self.sum.iter_mut().zip(other.sum.iter()) {
-//             *s_val += *o_val;
-//         }
+        // Update the sum of all points' coordinates in-place.
+        for (s_val, o_val) in self.sum.iter_mut().zip(other.sum.iter()) {
+            *s_val += *o_val;
+        }
 
-//         // Recalculate the average (centroid) in-place.
-//         let n = self.values.len() as f64;
-//         for i in 0..self.average.len() {
-//             self.average[i] = self.sum[i] / n;
-//         }
-//     }
-// }
+        // Recalculate the average (centroid) in-place.
+        let n = self.values.len() as f64;
+        for i in 0..self.average.len() {
+            self.average[i] = self.sum[i] / n;
+        }
+    }
+}
 
-// pub struct AgglomerativeClustering<TX, X> {
-//     pub labels: Vec<usize>,
-//     _phantom_tx: PhantomData<TX>,
-//     _phantom_x: PhantomData<X>,
-// }
+pub struct AgglomerativeClustering<TX, X> {
+    pub labels: Vec<usize>,
+    _phantom_tx: PhantomData<TX>,
+    _phantom_x: PhantomData<X>,
+}
 
-// impl<TX: FloatNumber + RealNumber, X: Array2<TX>> AgglomerativeClustering<TX, X>
-// where
-//     TX: Copy + Into<f64> + std::ops::Sub<Output = TX>,
-//     f64: From<TX>,
-// {
-//     pub fn fit(data: &X, n_clusters: usize) -> Result<Self, String> {
-//         let (num_samples, num_features) = data.shape();
-//         if num_samples < 2 {
-//             return Err("At least 2 samples are required for clustering.".to_string());
-//         }
+impl<TX: FloatNumber + RealNumber, X: Array2<TX>> AgglomerativeClustering<TX, X>
+{
+   pub fn fit(data: &X, n_clusters: usize) -> Result<Vec<usize>, String> {
+    let (num_samples, num_features) = data.shape();
+    let data: Vec<Vec<f64>> = (0..num_samples).map(|i| data.get_row(i).iterator(0).map(|x| x.to_f64().unwrap()).collect::<Vec<f64>>()).collect();
+    if num_samples < n_clusters {
+        return Err("Number of samples must be greater than or equal to n_clusters.".to_string());
+    }
 
-//         let mut kdtree = KdTree::new(num_features);
-//         // The HashMap is the single source of truth for all cluster data.
-//         let mut clusters = HashMap::with_capacity(num_samples);
+    // --- 1. Initialization ---
+    let mut kdtree = KdTree::new(num_features);
+    kdtree.create(data.clone(), (0..num_samples).collect());
+    let mut clusters = HashMap::with_capacity(num_samples);
 
-//         // --- Initialization ---
-//         for i in 0..num_samples {
-//             let point_data: Vec<f64> = data.get_row(i).iterator(0).map(|x| x.to_f64().unwrap().collect());
+    for (i, row) in data.into_iter().enumerate() {
+        // Each point starts as its own cluster. The cluster ID is the point's original index.
+        let cluster = Cluster::new(i, row.clone());
+        clusters.insert(i, cluster);
+    }
 
-//             // Create the initial cluster.
-//             let cluster = Cluster::new(i, point_data.clone());
+    // --- 2. Main Clustering Loop ---
+    // This loop implements the reciprocal nearest neighbors strategy.
 
-//             // Add the cluster's location and ID to the spatial index.
-//             kdtree.add(point_data, i).unwrap();
-//             clusters.insert(i, cluster);
-//         }
+    // Start with an arbitrary cluster (id 0) and find its nearest neighbor.
+    let start_index = 0;
+    let (_, mut a_index, mut a_node) = kdtree.nearest(&clusters[&start_index].average, start_index);
+    let (_, mut b_index, mut b_node) = kdtree.nearest(&clusters[&a_index].average, a_index);
 
-//         // --- Main Clustering Loop ---
+    while clusters.len() > n_clusters {
+        let b_average = clusters[&b_index].average.clone();
+        let (_, c_index, c_node) = kdtree.nearest(&b_average, b_index);
+        // --- Reciprocal Match Check ---
+        if a_index == c_index {
+            kdtree.remove(a_node.clone());
+            kdtree.remove(b_node.clone());
+            let b_cluster = clusters.remove(&b_index).unwrap();
+            let a_cluster = clusters.get_mut(&a_index).unwrap();
+            a_cluster.add_cluster(b_cluster);
+            kdtree.insert(a_cluster.average.clone(), a_index);
+            let (_, b_index_, b_node_) = kdtree.nearest(&clusters[&a_index].average, a_index);
+            b_index = b_index_;
+            b_node = b_node_;
+        } else {
+            a_index = b_index;
+            a_node = b_node;
+            b_index = c_index;
+            b_node = c_node;
+        }
+    }
 
-//         // Start with an arbitrary cluster (e.g., id 0) and its nearest neighbor.
-//         let mut a_id = 0;
-//         let a_average = clusters.get(&a_id).unwrap().average.clone();
-//         let b_results = kdtree.nearest(&a_average, 2, &squared_euclidean).unwrap();
-//         let mut b_id = *b_results[1].1;
-//         let mut clusters_len = clusters.len();
+    let mut labels = vec![0; num_samples];
+    for (final_label, (_, cluster)) in clusters.iter().enumerate() {
+        for original_point_index in cluster.values.iter() {
+            labels[*original_point_index] = final_label;
+        }
+    }
 
-//         while clusters_len > n_clusters {
-//             println!("{}, {}", a_id, b_id);
-//             // Find C, the nearest neighbor of B.
-//             // We clone `b_average` because the kdtree query requires an owned value or a reference.
-//             let b_average = clusters.get(&b_id).unwrap().average.clone();
-//             let c_results = kdtree.nearest(&b_average, 2, &squared_euclidean).unwrap();
-//             let mut c_id = *c_results[1].1;
-//             if c_id == b_id {
-//                 c_id =  *c_results[0].1;
-//             }
-//             // Check for a reciprocal best match using efficient ID comparison.
-//             if a_id == c_id {
-//                 // --- Merge B into A ---
-
-//                 // Store old average of A before it gets modified.
-//                 let old_a_average = clusters.get(&a_id).unwrap().average.clone();
-
-//                 // Remove B from the HashMap to take ownership of it.
-//                 let b_cluster = clusters.remove(&b_id).unwrap();
-//                 clusters_len -= 1;
-//                 // Also remove B from the kdtree.
-//                 kdtree.remove(&b_cluster.average, &b_id).unwrap();
-
-//                 // Get a mutable reference to A to perform the merge.
-//                 let a_cluster_mut = clusters.get_mut(&a_id).unwrap();
-//                 // Remove the old A from the kdtree before its average changes.
-//                 kdtree.remove(&old_a_average, &a_id).unwrap();
-
-//                 // Perform the efficient, in-place merge. This consumes b_cluster.
-//                 a_cluster_mut.add_cluster(b_cluster);
-
-//                 // Add the updated cluster A back to the kdtree with its new average.
-//                 kdtree.add(a_cluster_mut.average.clone(), a_id).unwrap();
-//                 // For the next iteration, find the new nearest neighbor for our merged cluster.
-//                 if clusters_len > n_clusters {
-//                     let new_a_average = &a_cluster_mut.average;
-//                     let new_b_results = kdtree.nearest(new_a_average, 2, &squared_euclidean).unwrap();
-//                     b_id = *new_b_results[1].1;
-//                 }
-//             } else {
-//                 // Not a reciprocal match, so we "walk" to the next pair.
-//                 a_id = b_id;
-//                 b_id = c_id;
-//             }
-//             clusters_len = clusters.len();
-//         }
-//         let mut labels = vec![0; num_samples];
-
-//         for (i, (_, cluster)) in clusters.iter().enumerate() {
-//             for index in cluster.values.iter() {
-//                  labels[*index] = i;
-//             }
-//         }
-
-//         // At this point, `clusters` contains the single, final cluster.
-//         // Label assignment can be implemented here if needed.
-//         Ok(Self {
-//             labels,
-//             _phantom_tx: PhantomData,
-//             _phantom_x: PhantomData,
-//         })
-//     }
-// }
+    Ok(labels)
+} 
+}
