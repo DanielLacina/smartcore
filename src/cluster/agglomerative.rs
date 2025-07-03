@@ -97,10 +97,7 @@ impl<TX: Number, TY: Number, X: Array2<TX>, Y: Array1<TY>> AgglomerativeClusteri
         if n_clusters > num_samples {
             return Err(Failed::because(
                 FailedError::ParametersError,
-                &format!(
-                    "n_clusters: {} cant be greater than n_samples: {}",
-                    n_clusters, num_samples
-                ),
+                &format!("n_clusters: {n_clusters} cannot be greater than n_samples: {num_samples}"),
             ));
         }
 
