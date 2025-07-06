@@ -101,6 +101,7 @@ pub struct DecisionTreeRegressor<TX: Number + PartialOrd, TY: Number, X: Array2<
     nodes: Vec<Node>,
     parameters: Option<DecisionTreeRegressorParameters>,
     depth: u16,
+    pub(crate) gamma: Option<f64>,
     _phantom_tx: PhantomData<TX>,
     _phantom_ty: PhantomData<TY>,
     _phantom_x: PhantomData<X>,
@@ -345,6 +346,7 @@ struct NodeVisitor<'a, TX: Number + PartialOrd, TY: Number, X: Array2<TX>, Y: Ar
     x: &'a X,
     y: &'a Y,
     node: usize,
+    similariy_score: Option<f64>,
     samples: Vec<usize>,
     order: &'a [Vec<usize>],
     true_child_output: f64,
@@ -368,6 +370,7 @@ impl<'a, TX: Number + PartialOrd, TY: Number, X: Array2<TX>, Y: Array1<TY>>
         NodeVisitor {
             x,
             y,
+            similariy_score: None,
             node: node_id,
             samples,
             order,
@@ -377,6 +380,16 @@ impl<'a, TX: Number + PartialOrd, TY: Number, X: Array2<TX>, Y: Array1<TY>>
             _phantom_tx: PhantomData,
             _phantom_ty: PhantomData,
         }
+    }
+
+    pub fn set_similarity_score(&mut self) {
+        self.similariy_score = Some(
+            self.samples
+                .iter()
+                .map(|i| self.y.get(*i).to_f64().unwrap())
+                .sum::<f64>()
+                .powi(2),
+        );
     }
 }
 
@@ -389,6 +402,7 @@ impl<TX: Number + PartialOrd, TY: Number, X: Array2<TX>, Y: Array1<TY>>
             nodes: vec![],
             parameters: Option::None,
             depth: 0u16,
+            gamma: None,
             _phantom_tx: PhantomData,
             _phantom_ty: PhantomData,
             _phantom_x: PhantomData,
@@ -426,7 +440,7 @@ impl<TX: Number + PartialOrd, TY: Number, X: Array2<TX>, Y: Array1<TY>>
         }
 
         let samples = vec![1; x_nrows];
-        DecisionTreeRegressor::fit_weak_learner(x, y, samples, num_attributes, parameters)
+        DecisionTreeRegressor::fit_weak_learner(x, y, samples, num_attributes, parameters, None)
     }
 
     pub(crate) fn fit_weak_learner(
@@ -435,6 +449,7 @@ impl<TX: Number + PartialOrd, TY: Number, X: Array2<TX>, Y: Array1<TY>>
         samples: Vec<usize>,
         mtry: usize,
         parameters: DecisionTreeRegressorParameters,
+        gamma: Option<f64>,
     ) -> Result<DecisionTreeRegressor<TX, TY, X, Y>, Failed> {
         let y_m = y.clone();
 
@@ -461,6 +476,7 @@ impl<TX: Number + PartialOrd, TY: Number, X: Array2<TX>, Y: Array1<TY>>
         }
 
         let mut tree = DecisionTreeRegressor {
+            gamma,
             nodes,
             parameters: Some(parameters),
             depth: 0u16,
@@ -475,6 +491,9 @@ impl<TX: Number + PartialOrd, TY: Number, X: Array2<TX>, Y: Array1<TY>>
         let mut visitor_queue: LinkedList<NodeVisitor<'_, TX, TY, X, Y>> = LinkedList::new();
 
         if tree.find_best_cutoff(&mut visitor, mtry, &mut rng) {
+            if gamma.is_some() {
+                visitor.set_similarity_score();
+            }
             visitor_queue.push_back(visitor);
         }
 
@@ -658,17 +677,8 @@ impl<TX: Number + PartialOrd, TY: Number, X: Array2<TX>, Y: Array1<TY>>
 
             return false;
         }
-
         let true_child_idx = self.nodes().len();
-
-        self.nodes.push(Node::new(visitor.true_child_output));
         let false_child_idx = self.nodes().len();
-        self.nodes.push(Node::new(visitor.false_child_output));
-
-        self.nodes[visitor.node].true_child = Some(true_child_idx);
-        self.nodes[visitor.node].false_child = Some(false_child_idx);
-
-        self.depth = u16::max(self.depth, visitor.level + 1);
 
         let mut true_visitor = NodeVisitor::<TX, TY, X, Y>::new(
             true_child_idx,
@@ -678,11 +688,6 @@ impl<TX: Number + PartialOrd, TY: Number, X: Array2<TX>, Y: Array1<TY>>
             visitor.y,
             visitor.level + 1,
         );
-
-        if self.find_best_cutoff(&mut true_visitor, mtry, rng) {
-            visitor_queue.push_back(true_visitor);
-        }
-
         let mut false_visitor = NodeVisitor::<TX, TY, X, Y>::new(
             false_child_idx,
             visitor.samples,
@@ -691,6 +696,32 @@ impl<TX: Number + PartialOrd, TY: Number, X: Array2<TX>, Y: Array1<TY>>
             visitor.y,
             visitor.level + 1,
         );
+
+        if let Some(gamma) = self.gamma {
+            self.nodes[visitor.node].split_feature = 0;
+            self.nodes[visitor.node].split_value = Option::None;
+            self.nodes[visitor.node].split_score = Option::None;
+            true_visitor.set_similarity_score();
+            false_visitor.set_similarity_score();
+            let gain = true_visitor.similariy_score.unwrap()
+                + false_visitor.similariy_score.unwrap()
+                - visitor.similariy_score.unwrap();
+            if gain < gamma {
+                return false;
+            }
+        }
+
+        self.nodes.push(Node::new(visitor.true_child_output));
+        self.nodes.push(Node::new(visitor.false_child_output));
+
+        self.nodes[visitor.node].true_child = Some(true_child_idx);
+        self.nodes[visitor.node].false_child = Some(false_child_idx);
+
+        self.depth = u16::max(self.depth, visitor.level + 1);
+
+        if self.find_best_cutoff(&mut true_visitor, mtry, rng) {
+            visitor_queue.push_back(true_visitor);
+        }
 
         if self.find_best_cutoff(&mut false_visitor, mtry, rng) {
             visitor_queue.push_back(false_visitor);
