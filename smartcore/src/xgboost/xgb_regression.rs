@@ -1,24 +1,43 @@
 use std::{iter::zip, marker::PhantomData};
 
+use rand::{seq::SliceRandom, Rng};
+
 use crate::{
     api::{PredictorBorrow, SupervisedEstimatorBorrow},
-    error::Failed,
+    error::{Failed, FailedError},
     linalg::basic::arrays::{Array1, Array2},
     numbers::{basenum::Number, realnum::RealNumber},
+    rand_custom::get_rng_impl,
     tree::decision_tree_regressor::{self, DecisionTreeRegressor, DecisionTreeRegressorParameters},
 };
 
 #[derive(Clone)]
 pub struct XGBRegressorParameters {
     pub n_estimators: usize,
+    pub max_depth: u16,
     pub learning_rate: f64,
+    pub min_samples_leaf: usize,
+    pub min_child_weight: f64,
+    pub lambda: f64,
+    pub gamma: f64,
+    pub base_score: f64,
+    pub subsample: f64,
+    pub seed: u64,
 }
 
 impl Default for XGBRegressorParameters {
     fn default() -> Self {
         Self {
-            n_estimators: 10,
-            learning_rate: 0.1,
+            n_estimators: 100,
+            learning_rate: 0.3,
+            max_depth: 6,
+            min_samples_leaf: 1,
+            min_child_weight: 1.0,
+            lambda: 1.0,
+            gamma: 0.0,
+            base_score: 0.5,
+            subsample: 1.0,
+            seed: 0,
         }
     }
 }
@@ -33,11 +52,42 @@ impl XGBRegressorParameters {
         self.learning_rate = learning_rate;
         self
     }
+    pub fn with_max_depth(mut self, max_depth: u16) -> Self {
+        self.max_depth = max_depth;
+        self
+    }
+    pub fn with_min_samples_leaf(mut self, min_samples_leaf: usize) -> Self {
+        self.min_samples_leaf = min_samples_leaf;
+        self
+    }
+    pub fn with_lambda(mut self, lambda: f64) -> Self {
+        self.lambda = lambda;
+        self
+    }
+    pub fn with_gamma(mut self, gamma: f64) -> Self {
+        self.gamma = gamma;
+        self
+    }
+    pub fn with_base_score(mut self, base_score: f64) -> Self {
+        self.base_score = base_score;
+        self
+    }
+    pub fn with_subsample(mut self, subsample: f64) -> Self {
+        self.subsample = subsample;
+        self
+    }
+    pub fn with_seed(mut self, seed: u64) -> Self {
+        self.seed = seed;
+        self
+    }
+    pub fn with_min_child_weight(mut self, min_child_weight: f64) -> Self {
+        self.min_child_weight = min_child_weight;
+        self
+    }
 }
 
 pub struct XGBRegressor<TX: Number + PartialOrd, TY: Number, X: Array2<TX>, Y: Array1<TY>> {
     regressors: Option<Vec<DecisionTreeRegressor<TX, f64, X, Vec<f64>>>>,
-    initial_prediction: Option<f64>,
     parameters: Option<XGBRegressorParameters>,
     _phantom_ty: PhantomData<TY>,
     _phantom_y: PhantomData<Y>,
@@ -60,7 +110,14 @@ impl<TX: Number + PartialOrd, TY: Number, X: Array2<TX>, Y: Array1<TY>> XGBRegre
     /// A `Result` containing the trained `XGBoostRegressor` or a `Failed` error.
     pub fn fit(data: &X, y: &Y, parameters: XGBRegressorParameters) -> Result<Self, Failed> {
         // Start with an initial prediction, often the mean of the target values.
-        let initial_prediction = y.mean_by();
+        if parameters.subsample < 1.0 {
+             return Err(Failed::because(FailedError::ParametersError, &format!(
+                "Incorrect subsample ratio: {}. A subsample ratio of 1.0 is required.",
+                parameters.subsample
+            )));
+        }
+        let (n_samples, n_features) = data.shape();
+        let initial_prediction = parameters.base_score;
         let learning_rate = parameters.learning_rate;
 
         // Convert the target labels to a Vec<f64>.
@@ -73,13 +130,31 @@ impl<TX: Number + PartialOrd, TY: Number, X: Array2<TX>, Y: Array1<TY>> XGBRegre
             .collect();
 
         let mut regressors = Vec::new();
-        let decision_tree_params = DecisionTreeRegressorParameters::default();
+        let decision_tree_params = DecisionTreeRegressorParameters::default()
+            .with_max_depth(parameters.max_depth)
+            .with_min_samples_leaf(parameters.min_samples_leaf);
+        let mut rng = get_rng_impl(Some(parameters.seed));
 
         // Iteratively build the ensemble of decision trees.
         for _ in 0..parameters.n_estimators {
             // Train a new decision tree on the current residuals.
-            let decision_tree_regressor =
-                DecisionTreeRegressor::fit(data, &residuals, decision_tree_params.clone()).unwrap();
+            let samples = Self::create_subsample_mask(
+                n_samples,
+                (parameters.subsample * n_samples as f64) as usize,
+                &mut rng,
+            );
+
+            let decision_tree_regressor = DecisionTreeRegressor::fit_weak_learner(
+                data,
+                &residuals,
+                samples,
+                n_features,
+                decision_tree_params.clone(),
+                Some(parameters.lambda),
+                Some(parameters.gamma),
+                Some(parameters.min_child_weight) 
+            )
+            .unwrap();
 
             // Get the predictions from the newly trained tree. These are the "predicted residuals".
             let predicted_residuals = decision_tree_regressor.predict(data).unwrap();
@@ -97,16 +172,16 @@ impl<TX: Number + PartialOrd, TY: Number, X: Array2<TX>, Y: Array1<TY>> XGBRegre
         // Return the fully trained model.
         Ok(Self {
             regressors: Some(regressors),
-            initial_prediction: Some(initial_prediction),
             parameters: Some(parameters),
             _phantom_ty: PhantomData,
             _phantom_y: PhantomData,
         })
     }
+
     pub fn predict(&self, data: &X) -> Result<Vec<TX>, Failed> {
         let (n_samples, _) = data.shape();
-        let mut initial_predictions = vec![self.initial_prediction.unwrap(); n_samples];
         let parameters = self.parameters.as_ref().unwrap();
+        let mut initial_predictions = vec![parameters.base_score; n_samples];
         let learning_rate = parameters.learning_rate;
         let regressors = self.regressors.as_ref().unwrap();
         for regressor in regressors.iter() {
@@ -120,6 +195,31 @@ impl<TX: Number + PartialOrd, TY: Number, X: Array2<TX>, Y: Array1<TY>> XGBRegre
             .map(|v| TX::from(v).unwrap())
             .collect())
     }
+    fn create_subsample_mask(
+        nrows: usize,
+        subsample_size: usize,
+        rng: &mut impl Rng,
+    ) -> Vec<usize> {
+        // Ensure we don't try to sample more items than are available.
+
+        // 1. Create a vector containing all possible indices from 0 to nrows-1.
+        let mut all_indices: Vec<usize> = (0..nrows).collect();
+
+        // 2. Shuffle the entire list of indices randomly.
+        all_indices.shuffle(rng);
+
+        // 3. Create the result vector, initialized with zeros.
+        let mut sample_mask = vec![0; nrows];
+
+        // 4. Iterate through the first `subsample_size` shuffled indices
+        //    and set the corresponding position in the mask to 1.
+        for i in 0..subsample_size {
+            let selected_index = all_indices[i];
+            sample_mask[selected_index] = 1;
+        }
+
+        sample_mask
+    }
 }
 
 impl<TX: Number + PartialOrd, TY: Number, X: Array2<TX>, Y: Array1<TY>>
@@ -128,7 +228,6 @@ impl<TX: Number + PartialOrd, TY: Number, X: Array2<TX>, Y: Array1<TY>>
     fn new() -> Self {
         Self {
             regressors: None,
-            initial_prediction: None,
             parameters: None,
             _phantom_y: PhantomData,
             _phantom_ty: PhantomData,
