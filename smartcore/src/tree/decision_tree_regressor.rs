@@ -426,16 +426,7 @@ impl<TX: Number + PartialOrd, TY: Number, X: Array2<TX>, Y: Array1<TY>>
         }
 
         let samples = vec![1; x_nrows];
-        DecisionTreeRegressor::fit_weak_learner(
-            x,
-            y,
-            samples,
-            num_attributes,
-            parameters,
-            None,
-            None,
-            None
-        )
+        DecisionTreeRegressor::fit_weak_learner(x, y, samples, num_attributes, parameters)
     }
 
     pub(crate) fn fit_weak_learner(
@@ -444,9 +435,6 @@ impl<TX: Number + PartialOrd, TY: Number, X: Array2<TX>, Y: Array1<TY>>
         samples: Vec<usize>,
         mtry: usize,
         parameters: DecisionTreeRegressorParameters,
-        lambda: Option<f64>,
-        gamma: Option<f64>,
-        min_child_weight: Option<f64>
     ) -> Result<DecisionTreeRegressor<TX, TY, X, Y>, Failed> {
         let y_m = y.clone();
 
@@ -486,13 +474,13 @@ impl<TX: Number + PartialOrd, TY: Number, X: Array2<TX>, Y: Array1<TY>>
 
         let mut visitor_queue: LinkedList<NodeVisitor<'_, TX, TY, X, Y>> = LinkedList::new();
 
-        if tree.find_best_cutoff(&mut visitor, mtry, &mut rng, lambda, gamma, min_child_weight) {
+        if tree.find_best_cutoff(&mut visitor, mtry, &mut rng) {
             visitor_queue.push_back(visitor);
         }
 
         while tree.depth() < tree.parameters().max_depth.unwrap_or(u16::MAX) {
             match visitor_queue.pop_front() {
-                Some(node) => tree.split(node, mtry, &mut visitor_queue, &mut rng, lambda, gamma, min_child_weight),
+                Some(node) => tree.split(node, mtry, &mut visitor_queue, &mut rng),
                 None => break,
             };
         }
@@ -546,9 +534,6 @@ impl<TX: Number + PartialOrd, TY: Number, X: Array2<TX>, Y: Array1<TY>>
         visitor: &mut NodeVisitor<'_, TX, TY, X, Y>,
         mtry: usize,
         rng: &mut impl Rng,
-        lambda: Option<f64>,
-        gamma: Option<f64>, 
-        min_child_weight: Option<f64>
     ) -> bool {
         let (_, n_attr) = visitor.x.shape();
 
@@ -566,16 +551,11 @@ impl<TX: Number + PartialOrd, TY: Number, X: Array2<TX>, Y: Array1<TY>>
             variables.shuffle(rng);
         }
 
-        let lambda_val = if let Some(lambda) = lambda {
-            lambda
-        } else {
-            0.0
-        };
         let parent_gain =
-            (n as f64).powi(2)/(n as f64 + lambda_val)  * self.nodes()[visitor.node].output * self.nodes()[visitor.node].output;
+            n as f64 * self.nodes()[visitor.node].output * self.nodes()[visitor.node].output;
 
         for variable in variables.iter().take(mtry) {
-            self.find_best_split(visitor, n, sum, parent_gain, *variable, lambda, gamma, min_child_weight);
+            self.find_best_split(visitor, n, sum, parent_gain, *variable);
         }
 
         self.nodes()[visitor.node].split_score.is_some()
@@ -588,9 +568,6 @@ impl<TX: Number + PartialOrd, TY: Number, X: Array2<TX>, Y: Array1<TY>>
         sum: f64,
         parent_gain: f64,
         j: usize,
-        lambda: Option<f64>,
-        gamma: Option<f64>,
-        min_child_weight: Option<f64>,
     ) {
         let mut true_sum = 0f64;
         let mut true_count = 0;
@@ -599,8 +576,6 @@ impl<TX: Number + PartialOrd, TY: Number, X: Array2<TX>, Y: Array1<TY>>
         for i in visitor.order[j].iter() {
             if visitor.samples[*i] > 0 {
                 let x_ij = *visitor.x.get((*i, j));
-
-                
 
                 if prevx.is_none() || x_ij == prevx.unwrap() {
                     prevx = Some(x_ij);
@@ -619,30 +594,13 @@ impl<TX: Number + PartialOrd, TY: Number, X: Array2<TX>, Y: Array1<TY>>
                     true_sum += visitor.samples[*i] as f64 * visitor.y.get(*i).to_f64().unwrap();
                     continue;
                 }
-                let false_sum = sum - true_sum;
 
-                if let Some(min_child_weight) = min_child_weight {
-                    if true_sum < min_child_weight {
-                        continue;
-                    } else if false_sum < min_child_weight {
-                        continue; 
-                    }
-                }
+                let true_mean = true_sum / true_count as f64;
+                let false_mean = (sum - true_sum) / false_count as f64;
 
-                let lambda_val = if let Some(lambda) = lambda {
-                    lambda
-                } else {
-                    0.0
-                };
-                let gamma_val = if let Some(gamma) = gamma {
-                    gamma
-                } else {
-                    0.0
-                 };
-
-                let gain = 0.5 * (true_sum.powi(2) / (true_count as f64 + lambda_val)
-                    + false_sum.powi(2) / (false_count as f64 + lambda_val)
-                    - parent_gain) - gamma_val/2.0;
+                let gain = (true_count as f64 * true_mean * true_mean
+                    + false_count as f64 * false_mean * false_mean)
+                    - parent_gain;
 
                 if self.nodes()[visitor.node].split_score.is_none()
                     || gain > self.nodes()[visitor.node].split_score.unwrap()
@@ -652,8 +610,8 @@ impl<TX: Number + PartialOrd, TY: Number, X: Array2<TX>, Y: Array1<TY>>
                         Option::Some((x_ij + prevx.unwrap()).to_f64().unwrap() / 2f64);
                     self.nodes[visitor.node].split_score = Option::Some(gain);
 
-                    visitor.true_child_output = true_sum / (true_count as f64 + lambda_val);
-                    visitor.false_child_output = false_sum / (false_count as f64 + lambda_val);
+                    visitor.true_child_output = true_mean;
+                    visitor.false_child_output = false_mean;
                 }
 
                 prevx = Some(x_ij);
@@ -669,9 +627,6 @@ impl<TX: Number + PartialOrd, TY: Number, X: Array2<TX>, Y: Array1<TY>>
         mtry: usize,
         visitor_queue: &mut LinkedList<NodeVisitor<'a, TX, TY, X, Y>>,
         rng: &mut impl Rng,
-        lambda: Option<f64>,
-        gamma: Option<f64>,
-        min_child_weight: Option<f64>,
     ) -> bool {
         let (n, _) = visitor.x.shape();
         let mut tc = 0;
@@ -695,7 +650,6 @@ impl<TX: Number + PartialOrd, TY: Number, X: Array2<TX>, Y: Array1<TY>>
                 }
             }
         }
-
 
         if tc < self.parameters().min_samples_leaf || fc < self.parameters().min_samples_leaf {
             self.nodes[visitor.node].split_feature = 0;
@@ -725,7 +679,7 @@ impl<TX: Number + PartialOrd, TY: Number, X: Array2<TX>, Y: Array1<TY>>
             visitor.level + 1,
         );
 
-        if self.find_best_cutoff(&mut true_visitor, mtry, rng, lambda, gamma, min_child_weight) {
+        if self.find_best_cutoff(&mut true_visitor, mtry, rng) {
             visitor_queue.push_back(true_visitor);
         }
 
@@ -738,7 +692,7 @@ impl<TX: Number + PartialOrd, TY: Number, X: Array2<TX>, Y: Array1<TY>>
             visitor.level + 1,
         );
 
-        if self.find_best_cutoff(&mut false_visitor, mtry, rng, lambda, gamma, min_child_weight) {
+        if self.find_best_cutoff(&mut false_visitor, mtry, rng) {
             visitor_queue.push_back(false_visitor);
         }
 

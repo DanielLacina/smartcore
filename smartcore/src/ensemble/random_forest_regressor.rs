@@ -431,8 +431,7 @@ impl<TX: Number + FloatNumber + PartialOrd, TY: Number, X: Array2<TX>, Y: Array1
                 min_samples_split: parameters.min_samples_split,
                 seed: Some(parameters.seed),
             };
-            let tree =
-                DecisionTreeRegressor::fit_weak_learner(x, y, samples, mtry, params, None, None, None)?;
+            let tree = DecisionTreeRegressor::fit_weak_learner(x, y, samples, mtry, params)?;
             trees.push(tree);
         }
 

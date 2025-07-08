@@ -1,5 +1,4 @@
 use std::{iter::zip, marker::PhantomData};
-
 use rand::{seq::SliceRandom, Rng};
 
 use crate::{
@@ -11,13 +10,152 @@ use crate::{
     tree::decision_tree_regressor::{self, DecisionTreeRegressor, DecisionTreeRegressorParameters},
 };
 
+struct TreeBooster {
+    left: Option<Box<TreeBooster>>,
+    right: Option<Box<TreeBooster>>,
+    value: f64,
+    threshold: f64,
+    split_feature_idx: usize,
+    split_score: f64
+}
+
+impl TreeBooster {
+    pub fn fit(
+        data: &Vec<Vec<f64>>,
+        g: &Vec<f64>,
+        h: &Vec<f64>,
+        idxs: &Vec<usize>,
+        max_depth: u16,
+        min_child_weight: f64,
+        lambda: f64,
+        gamma: f64,
+    ) -> Self{
+        let value = g.iter().sum::<f64>() / (h.iter().sum::<f64>() + lambda);
+        let mut best_feature_idx = usize::MAX;
+        let mut best_split_score = 0.0;
+        let mut best_threshold = 0.0;
+        let mut left = Option::None;
+        let mut right = Option::None;
+        if max_depth <= 0 {
+            return Self {
+                left,
+                right,
+                value,
+                threshold: best_threshold,
+                split_feature_idx: best_feature_idx,
+                split_score: best_split_score,
+            };     
+        } 
+        Self::insert_child_nodes(data, g, h, idxs, &mut best_feature_idx, &mut best_split_score, &mut best_threshold, &mut left, &mut right, max_depth, min_child_weight, lambda, gamma); 
+        Self {
+            left,
+            right,
+            value,
+            threshold: best_threshold,
+            split_feature_idx: best_feature_idx,
+            split_score: best_split_score,
+        }
+    }
+
+    fn insert_child_nodes (
+        data: &Vec<Vec<f64>>,
+        g: &Vec<f64>,
+        h: &Vec<f64>,
+        idxs: &Vec<usize>,
+        best_feature_idx: &mut usize,
+        best_split_score: &mut f64, 
+        best_threshold: &mut f64, 
+        left: &mut Option<Box<Self>>, 
+        right: &mut Option<Box<Self>>,
+        max_depth: u16,
+        min_child_weight: f64,
+        lambda: f64,
+        gamma: f64) {
+        for i in 0..data[0].len() {
+            Self::find_best_split(data, g, h, idxs, i, best_feature_idx, best_split_score, best_threshold, min_child_weight, lambda, gamma);
+        }      
+        if *best_split_score == 0.0 {
+            return;
+        } 
+        let mut left_idxs = Vec::new();
+        let mut right_idxs = Vec::new();
+        for idx in idxs.iter() {
+            if data[*idx][*best_feature_idx] <= *best_threshold {
+                left_idxs.push(*idx);
+            } else {
+                right_idxs.push(*idx);
+            }
+        }
+        *left = Some(Box::new(TreeBooster::fit(
+            data,
+            g,
+            h,
+            &left_idxs,
+            max_depth - 1,
+            min_child_weight,
+            lambda,
+            gamma,
+        )));
+        *right = Some(Box::new(TreeBooster::fit(
+            data,
+            g,
+            h,
+            &right_idxs,
+            max_depth - 1,
+            min_child_weight,
+            lambda,
+            gamma,
+        )));
+    }
+    
+    fn find_best_split(
+        data: &Vec<Vec<f64>>,
+        g: &Vec<f64>,
+        h: &Vec<f64>,
+        idxs: &Vec<usize>,
+        feature_idx: usize,
+        best_feature_idx: &mut usize,
+        best_split_score: &mut f64, 
+        best_threshold: &mut f64, 
+        min_child_weight: f64,
+        lambda: f64,
+        gamma: f64,
+    ) {
+        let mut idxs = idxs.clone();
+        idxs.sort_by(|a, b| data[*a][feature_idx].partial_cmp(&data[*b][feature_idx]).unwrap());
+        let sum_g = idxs.iter().map(|&i| g[i]).sum::<f64>();
+        let sum_h = idxs.iter().map(|&i| h[i]).sum::<f64>();
+        let (mut sum_g_right, mut sum_h_left) = (sum_g, sum_h);
+        let (mut sum_g_left, mut sum_h_right) = (0.0, 0.0);
+        for i in 0..idxs.len() - 1 {
+           let idx = idxs[i]; 
+           let (g_i, h_i, x_i, x_i_next) = (g[idx],h[idx],data[idx][feature_idx], data[idx][feature_idx]); 
+           sum_g_left += g_i;
+           sum_h_left += h_i;
+           sum_g_right -= g_i;
+           sum_h_right -= h_i;
+           if sum_h_left < min_child_weight || x_i == x_i_next {
+            continue;
+           }
+           if sum_h_right < min_child_weight {
+            break;
+           }
+           let gain = 0.5 * (sum_g_left * sum_g_left / (sum_h_left + lambda) + sum_g_right * sum_g_right / (sum_h_right + lambda) - sum_g * sum_g / (sum_h + lambda))
+                - gamma/2.0;
+            if gain > *best_split_score {
+                *best_split_score = gain;
+                *best_threshold = (x_i + x_i_next) / 2.0;
+                *best_feature_idx = idx;
+            } 
+        }
+    }
+}
 #[derive(Clone)]
 pub struct XGBRegressorParameters {
     pub n_estimators: usize,
     pub max_depth: u16,
     pub learning_rate: f64,
     pub min_samples_leaf: usize,
-    pub min_child_weight: f64,
     pub lambda: f64,
     pub gamma: f64,
     pub base_score: f64,
@@ -32,7 +170,6 @@ impl Default for XGBRegressorParameters {
             learning_rate: 0.3,
             max_depth: 6,
             min_samples_leaf: 1,
-            min_child_weight: 1.0,
             lambda: 1.0,
             gamma: 0.0,
             base_score: 0.5,
@@ -80,10 +217,6 @@ impl XGBRegressorParameters {
         self.seed = seed;
         self
     }
-    pub fn with_min_child_weight(mut self, min_child_weight: f64) -> Self {
-        self.min_child_weight = min_child_weight;
-        self
-    }
 }
 
 pub struct XGBRegressor<TX: Number + PartialOrd, TY: Number, X: Array2<TX>, Y: Array1<TY>> {
@@ -110,9 +243,9 @@ impl<TX: Number + PartialOrd, TY: Number, X: Array2<TX>, Y: Array1<TY>> XGBRegre
     /// A `Result` containing the trained `XGBoostRegressor` or a `Failed` error.
     pub fn fit(data: &X, y: &Y, parameters: XGBRegressorParameters) -> Result<Self, Failed> {
         // Start with an initial prediction, often the mean of the target values.
-        if parameters.subsample < 1.0 {
+        if parameters.subsample > 1.0 {
              return Err(Failed::because(FailedError::ParametersError, &format!(
-                "Incorrect subsample ratio: {}. A subsample ratio of 1.0 is required.",
+                "Incorrect subsample ratio: {}. A subsample ratio of less than or equal to 1.0 is required.",
                 parameters.subsample
             )));
         }
@@ -152,7 +285,6 @@ impl<TX: Number + PartialOrd, TY: Number, X: Array2<TX>, Y: Array1<TY>> XGBRegre
                 decision_tree_params.clone(),
                 Some(parameters.lambda),
                 Some(parameters.gamma),
-                Some(parameters.min_child_weight) 
             )
             .unwrap();
 
