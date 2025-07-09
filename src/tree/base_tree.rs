@@ -9,7 +9,6 @@ use rand::Rng;
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
 
-use crate::api::{Predictor, SupervisedEstimator};
 use crate::error::Failed;
 use crate::linalg::basic::arrays::{Array1, Array2, MutArrayView1};
 use crate::numbers::basenum::Number;
@@ -169,33 +168,6 @@ impl<'a, TX: Number + PartialOrd, TY: Number, X: Array2<TX>, Y: Array1<TY>>
     }
 }
 
-impl<TX: Number + PartialOrd, TY: Number, X: Array2<TX>, Y: Array1<TY>>
-    SupervisedEstimator<X, Y, BaseTreeRegressorParameters> for BaseTreeRegressor<TX, TY, X, Y>
-{
-    fn new() -> Self {
-        Self {
-            nodes: vec![],
-            parameters: Option::None,
-            depth: 0u16,
-            _phantom_tx: PhantomData,
-            _phantom_ty: PhantomData,
-            _phantom_x: PhantomData,
-            _phantom_y: PhantomData,
-        }
-    }
-
-    fn fit(x: &X, y: &Y, parameters: BaseTreeRegressorParameters) -> Result<Self, Failed> {
-        BaseTreeRegressor::fit(x, y, parameters)
-    }
-}
-
-impl<TX: Number + PartialOrd, TY: Number, X: Array2<TX>, Y: Array1<TY>> Predictor<X, Y>
-    for BaseTreeRegressor<TX, TY, X, Y>
-{
-    fn predict(&self, x: &X) -> Result<Y, Failed> {
-        self.predict(x)
-    }
-}
 
 impl<TX: Number + PartialOrd, TY: Number, X: Array2<TX>, Y: Array1<TY>>
     BaseTreeRegressor<TX, TY, X, Y>
