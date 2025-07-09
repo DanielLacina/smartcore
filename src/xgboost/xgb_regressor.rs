@@ -10,7 +10,7 @@
 //!
 //! This implementation was ported to Rust from the concepts and algorithm explained in the blog post
 //! ["XGBoost from Scratch"](https://randomrealizations.com/posts/xgboost-from-scratch/). It is designed
-//! to be a general-purpose booster that can be used with any objective function that provides a gradient
+//! to be a general-purpose regressor that can be used with any objective function that provides a gradient
 //! and a hessian.
 //!
 //! Example:
@@ -530,7 +530,7 @@ impl<TX: Number + PartialOrd, TY: Number, X: Array2<TX>, Y: Array1<TY>> XGRegres
                 (0..n_samples).collect::<Vec<usize>>()
             };
 
-            let booster = TreeRegressor::fit(
+            let regressor = TreeRegressor::fit(
                 data,
                 &gradients,
                 &hessians,
@@ -541,12 +541,12 @@ impl<TX: Number + PartialOrd, TY: Number, X: Array2<TX>, Y: Array1<TY>> XGRegres
                 parameters.gamma,
             );
 
-            let corrections = booster.predict(data);
+            let corrections = regressor.predict(data);
             predictions = zip(predictions, corrections)
                 .map(|(pred, correction)| pred + (learning_rate * correction))
                 .collect();
 
-            regressors.push(booster);
+            regressors.push(regressor);
         }
 
         Ok(Self {
@@ -567,8 +567,8 @@ impl<TX: Number + PartialOrd, TY: Number, X: Array2<TX>, Y: Array1<TY>> XGRegres
         let mut predictions = vec![parameters.base_score; n_samples];
         let regressors = self.regressors.as_ref().unwrap();
 
-        for booster in regressors.iter() {
-            let corrections = booster.predict(data);
+        for regressor in regressors.iter() {
+            let corrections = regressor.predict(data);
             predictions = zip(predictions, corrections)
                 .map(|(pred, correction)| pred + (parameters.learning_rate * correction))
                 .collect();
@@ -695,7 +695,7 @@ mod tests {
 
     /// Tests that the TreeRegressor can build a simple one-level tree on multidimensional data.
     #[test]
-    fn test_tree_booster_fit_multidimensional() {
+    fn test_tree_regressor_fit_multidimensional() {
         let data = vec![
             vec![1.0, 10.0],
             vec![1.0, 20.0],
@@ -726,7 +726,7 @@ mod tests {
 
     /// A "smoke test" to ensure the main XGRegressor can fit and predict on multidimensional data.
     #[test]
-    fn test_xgbooster_fit_predict_multidimensional() {
+    fn test_xgregressor_fit_predict_multidimensional() {
         // Simple 2D data where y is roughly 2*x1 + 3*x2
         let x_vec = vec![
             vec![1.0, 1.0],
