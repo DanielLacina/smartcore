@@ -168,7 +168,6 @@ impl<'a, TX: Number + PartialOrd, TY: Number, X: Array2<TX>, Y: Array1<TY>>
     }
 }
 
-
 impl<TX: Number + PartialOrd, TY: Number, X: Array2<TX>, Y: Array1<TY>>
     BaseTreeRegressor<TX, TY, X, Y>
 {
