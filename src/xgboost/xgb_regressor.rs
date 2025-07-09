@@ -54,7 +54,6 @@ use crate::{
 };
 
 /// Defines the objective function to be optimized.
-///
 /// The objective function provides the loss, gradient (first derivative), and
 /// hessian (second derivative) required for the XGBoost algorithm.
 #[derive(Clone, Debug)]
@@ -73,13 +72,15 @@ impl Objective {
     ///
     /// # Returns
     /// The mean of the calculated loss values.
-    pub fn loss_function(&self, y_true: &Vec<f64>, y_pred: &Vec<f64>) -> f64 {
+    pub fn loss_function<TY: Number, Y: Array1<TY>>(&self, y_true: &Y, y_pred: &Vec<f64>) -> f64 {
         match self {
             Objective::MeanSquaredError => {
-                zip(y_true, y_pred)
-                    .map(|(true_val, pred_val)| 0.5 * (true_val - pred_val).powi(2))
+                zip(y_true.iterator(0), y_pred)
+                    .map(|(true_val, pred_val)| {
+                        0.5 * (true_val.to_f64().unwrap() - pred_val).powi(2)
+                    })
                     .sum::<f64>()
-                    / y_true.len() as f64
+                    / y_true.shape() as f64
             }
         }
     }
@@ -92,10 +93,10 @@ impl Objective {
     ///
     /// # Returns
     /// A vector of gradients for each sample.
-    pub fn gradient(&self, y_true: &Vec<f64>, y_pred: &Vec<f64>) -> Vec<f64> {
+    pub fn gradient<TY: Number, Y: Array1<TY>>(&self, y_true: &Y, y_pred: &Vec<f64>) -> Vec<f64> {
         match self {
-            Objective::MeanSquaredError => zip(y_true, y_pred)
-                .map(|(true_val, pred_val)| (*pred_val - *true_val))
+            Objective::MeanSquaredError => zip(y_true.iterator(0), y_pred)
+                .map(|(true_val, pred_val)| (*pred_val - true_val.to_f64().unwrap()))
                 .collect(),
         }
     }
@@ -109,9 +110,9 @@ impl Objective {
     /// # Returns
     /// A vector of hessians for each sample.
     #[allow(unused_variables)]
-    pub fn hessian(&self, y_true: &[f64], y_pred: &[f64]) -> Vec<f64> {
+    pub fn hessian<TY: Number, Y: Array1<TY>>(&self, y_true: &Y, y_pred: &[f64]) -> Vec<f64> {
         match self {
-            Objective::MeanSquaredError => vec![1.0; y_true.len()],
+            Objective::MeanSquaredError => vec![1.0; y_true.shape()],
         }
     }
 }
@@ -121,9 +122,9 @@ impl Objective {
 /// This is a recursive data structure where each `TreeRegressor` is a node
 /// that can have a left and a right child, also of type `TreeRegressor`.
 #[allow(dead_code)]
-struct TreeRegressor {
-    left: Option<Box<TreeRegressor>>,
-    right: Option<Box<TreeRegressor>>,
+struct TreeRegressor<TX: Number + PartialOrd, TY: Number, X: Array2<TX>, Y: Array1<TY>> {
+    left: Option<Box<TreeRegressor<TX, TY, X, Y>>>,
+    right: Option<Box<TreeRegressor<TX, TY, X, Y>>>,
     /// The output value of this node. If it's a leaf, this is the final prediction.
     value: f64,
     /// The feature value threshold used to split this node.
@@ -132,9 +133,15 @@ struct TreeRegressor {
     split_feature_idx: usize,
     /// The gain in score achieved by this split.
     split_score: f64,
+    _phantom_tx: PhantomData<TX>,
+    _phantom_ty: PhantomData<TY>,
+    _phantom_x: PhantomData<X>,
+    _phantom_y: PhantomData<Y>,
 }
 
-impl TreeRegressor {
+impl<TX: Number + PartialOrd, TY: Number, X: Array2<TX>, Y: Array1<TY>>
+    TreeRegressor<TX, TY, X, Y>
+{
     /// Recursively builds a decision tree (a `TreeRegressor` node).
     ///
     /// This function determines the optimal split for the given set of samples (`idxs`)
@@ -150,7 +157,7 @@ impl TreeRegressor {
     /// * `lambda` - L2 regularization term on weights.
     /// * `gamma` - Minimum loss reduction required to make a further partition.
     pub fn fit(
-        data: &Vec<Vec<f64>>,
+        data: &X,
         g: &Vec<f64>,
         h: &Vec<f64>,
         idxs: &[usize],
@@ -194,12 +201,16 @@ impl TreeRegressor {
             threshold: best_threshold,
             split_feature_idx: best_feature_idx,
             split_score: best_split_score,
+            _phantom_tx: PhantomData,
+            _phantom_ty: PhantomData,
+            _phantom_x: PhantomData,
+            _phantom_y: PhantomData,
         }
     }
 
     /// Finds the best split and creates child nodes if a valid split is found.
     fn insert_child_nodes(
-        data: &Vec<Vec<f64>>,
+        data: &X,
         g: &Vec<f64>,
         h: &Vec<f64>,
         idxs: &[usize],
@@ -213,7 +224,8 @@ impl TreeRegressor {
         lambda: f64,
         gamma: f64,
     ) {
-        for i in 0..data[0].len() {
+        let (_, n_features) = data.shape();
+        for i in 0..n_features {
             Self::find_best_split(
                 data,
                 g,
@@ -234,7 +246,7 @@ impl TreeRegressor {
             let mut left_idxs = Vec::new();
             let mut right_idxs = Vec::new();
             for idx in idxs.iter() {
-                if data[*idx][*best_feature_idx] <= *best_threshold {
+                if data.get((*idx, *best_feature_idx)).to_f64().unwrap() <= *best_threshold {
                     left_idxs.push(*idx);
                 } else {
                     right_idxs.push(*idx);
@@ -266,7 +278,7 @@ impl TreeRegressor {
 
     /// Iterates through a single feature to find the best possible split point.
     fn find_best_split(
-        data: &[Vec<f64>],
+        data: &X,
         g: &[f64],
         h: &[f64],
         idxs: &[usize],
@@ -280,8 +292,8 @@ impl TreeRegressor {
     ) {
         let mut sorted_idxs = idxs.to_owned();
         sorted_idxs.sort_by(|a, b| {
-            data[*a][feature_idx]
-                .partial_cmp(&data[*b][feature_idx])
+            data.get((*a, feature_idx))
+                .partial_cmp(data.get((*b, feature_idx)))
                 .unwrap()
         });
 
@@ -299,8 +311,8 @@ impl TreeRegressor {
 
             let g_i = g[idx];
             let h_i = h[idx];
-            let x_i = data[idx][feature_idx];
-            let x_i_next = data[next_idx][feature_idx];
+            let x_i = data.get((idx, feature_idx)).to_f64().unwrap();
+            let x_i_next = data.get((next_idx, feature_idx)).to_f64().unwrap();
 
             sum_g_left += g_i;
             sum_h_left += h_i;
@@ -329,19 +341,27 @@ impl TreeRegressor {
     }
 
     /// Predicts the output values for a dataset.
-    pub fn predict(&self, data: &[Vec<f64>]) -> Vec<f64> {
-        data.iter().map(|row| self.predict_for_row(row)).collect()
+    pub fn predict(&self, data: &X) -> Vec<f64> {
+        let (n_samples, n_features) = data.shape();
+        (0..n_samples)
+            .map(|i| {
+                self.predict_for_row(&Vec::from_iterator(
+                    data.get_row(i).iterator(0).copied(),
+                    n_features,
+                ))
+            })
+            .collect()
     }
 
     /// Predicts the output value for a single row of data by traversing the tree.
-    pub fn predict_for_row(&self, row: &Vec<f64>) -> f64 {
+    pub fn predict_for_row(&self, row: &Vec<TX>) -> f64 {
         // A leaf node is identified by having no children.
         if self.left.is_none() {
             return self.value;
         }
 
         // Recurse down the appropriate branch.
-        let child = if row[self.split_feature_idx] <= self.threshold {
+        let child = if row[self.split_feature_idx].to_f64().unwrap() <= self.threshold {
             self.left.as_ref().unwrap()
         } else {
             self.right.as_ref().unwrap()
@@ -351,7 +371,7 @@ impl TreeRegressor {
     }
 }
 
-/// Parameters for the `XGRegressor` model.
+/// Parameters for the `jRegressor` model.
 ///
 /// This struct holds all the hyperparameters that control the training process.
 #[derive(Clone, Debug)]
@@ -475,7 +495,7 @@ impl XGRegressorParameters {
 
 /// An Extreme Gradient Boosting (XGBoost) model for regression and classification tasks.
 pub struct XGRegressor<TX: Number + PartialOrd, TY: Number, X: Array2<TX>, Y: Array1<TY>> {
-    boosters: Option<Vec<TreeRegressor>>,
+    regressors: Option<Vec<TreeRegressor<TX, TY, X, Y>>>,
     parameters: Option<XGRegressorParameters>,
     _phantom_ty: PhantomData<TY>,
     _phantom_tx: PhantomData<TX>,
@@ -497,23 +517,12 @@ impl<TX: Number + PartialOrd, TY: Number, X: Array2<TX>, Y: Array1<TY>> XGRegres
         let learning_rate = parameters.learning_rate;
         let mut predictions = vec![parameters.base_score; n_samples];
 
-        // Inefficient data copy. For production, avoid this by making TreeRegressor generic.
-        let data_vec = (0..n_samples)
-            .map(|i| {
-                data.get_row(i)
-                    .iterator(0)
-                    .map(|x| x.to_f64().unwrap())
-                    .collect::<Vec<f64>>()
-            })
-            .collect::<Vec<Vec<f64>>>();
-        let labels: Vec<f64> = y.iterator(0).map(|v| v.to_f64().unwrap()).collect();
-
-        let mut boosters = Vec::new();
+        let mut regressors = Vec::new();
         let mut rng = get_rng_impl(Some(parameters.seed));
 
         for _ in 0..parameters.n_estimators {
-            let gradients = parameters.objective.gradient(&labels, &predictions);
-            let hessians = parameters.objective.hessian(&labels, &predictions);
+            let gradients = parameters.objective.gradient(y, &predictions);
+            let hessians = parameters.objective.hessian(y, &predictions);
 
             let sample_idxs = if parameters.subsample < 1.0 {
                 Self::sample_without_replacement(n_samples, parameters.subsample, &mut rng)
@@ -522,7 +531,7 @@ impl<TX: Number + PartialOrd, TY: Number, X: Array2<TX>, Y: Array1<TY>> XGRegres
             };
 
             let booster = TreeRegressor::fit(
-                &data_vec,
+                data,
                 &gradients,
                 &hessians,
                 &sample_idxs,
@@ -532,16 +541,16 @@ impl<TX: Number + PartialOrd, TY: Number, X: Array2<TX>, Y: Array1<TY>> XGRegres
                 parameters.gamma,
             );
 
-            let corrections = booster.predict(&data_vec);
+            let corrections = booster.predict(data);
             predictions = zip(predictions, corrections)
                 .map(|(pred, correction)| pred + (learning_rate * correction))
                 .collect();
 
-            boosters.push(booster);
+            regressors.push(booster);
         }
 
         Ok(Self {
-            boosters: Some(boosters),
+            regressors: Some(regressors),
             parameters: Some(parameters),
             _phantom_ty: PhantomData,
             _phantom_y: PhantomData,
@@ -553,21 +562,13 @@ impl<TX: Number + PartialOrd, TY: Number, X: Array2<TX>, Y: Array1<TY>> XGRegres
     /// Predicts target values for the given input data.
     pub fn predict(&self, data: &X) -> Result<Vec<TX>, Failed> {
         let (n_samples, _) = data.shape();
-        let data_vec = (0..n_samples)
-            .map(|i| {
-                data.get_row(i)
-                    .iterator(0)
-                    .map(|x| x.to_f64().unwrap())
-                    .collect::<Vec<f64>>()
-            })
-            .collect::<Vec<Vec<f64>>>();
 
         let parameters = self.parameters.as_ref().unwrap();
         let mut predictions = vec![parameters.base_score; n_samples];
-        let boosters = self.boosters.as_ref().unwrap();
+        let regressors = self.regressors.as_ref().unwrap();
 
-        for booster in boosters.iter() {
-            let corrections = booster.predict(&data_vec);
+        for booster in regressors.iter() {
+            let corrections = booster.predict(data);
             predictions = zip(predictions, corrections)
                 .map(|(pred, correction)| pred + (parameters.learning_rate * correction))
                 .collect();
@@ -598,7 +599,7 @@ impl<TX: Number + PartialOrd, TY: Number, X: Array2<TX>, Y: Array1<TY>>
 {
     fn new() -> Self {
         Self {
-            boosters: None,
+            regressors: None,
             parameters: None,
             _phantom_ty: PhantomData,
             _phantom_y: PhantomData,
@@ -624,7 +625,7 @@ impl<TX: Number + PartialOrd, TY: Number, X: Array2<TX>, Y: Array1<TY>> Predicto
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::linalg::basic::matrix::DenseMatrix;
+    use crate::linalg::basic::{arrays::Array, matrix::DenseMatrix};
 
     /// Tests the gradient and hessian calculations for MeanSquaredError.
     #[test]
@@ -651,6 +652,7 @@ mod tests {
             vec![1.0, 30.0], // g = 1.0
             vec![1.0, 40.0], // g = 1.5
         ];
+        let data = DenseMatrix::from_2d_vec(&data).unwrap();
         let g = vec![-0.5, -1.0, 1.0, 1.5];
         let h = vec![1.0, 1.0, 1.0, 1.0];
         let idxs = (0..4).collect::<Vec<usize>>();
@@ -669,8 +671,9 @@ mod tests {
         let expected_gain = 1.3166666666666667;
 
         // Search both features. The algorithm must find the best split on feature 1.
-        for i in 0..data[0].len() {
-            TreeRegressor::find_best_split(
+        let (_, n_features) = data.shape();
+        for i in 0..n_features {
+            TreeRegressor::<f64, f64, DenseMatrix<f64>, Vec<f64>>::find_best_split(
                 &data,
                 &g,
                 &h,
@@ -699,11 +702,14 @@ mod tests {
             vec![1.0, 30.0],
             vec![1.0, 40.0],
         ];
+        let data = DenseMatrix::from_2d_vec(&data).unwrap();
         let g = vec![-0.5, -1.0, 1.0, 1.5];
         let h = vec![1.0, 1.0, 1.0, 1.0];
         let idxs = (0..4).collect::<Vec<usize>>();
 
-        let tree = TreeRegressor::fit(&data, &g, &h, &idxs, 2, 1.0, 1.0, 0.0);
+        let tree = TreeRegressor::<f64, f64, DenseMatrix<f64>, Vec<f64>>::fit(
+            &data, &g, &h, &idxs, 2, 1.0, 1.0, 0.0,
+        );
 
         // Check that the root node was split on the correct feature
         assert!(tree.left.is_some());
