@@ -130,5 +130,6 @@ pub mod readers;
 pub mod svm;
 /// Supervised tree-based learning methods
 pub mod tree;
+pub mod xgboost;
 
 pub(crate) mod rand_custom;
