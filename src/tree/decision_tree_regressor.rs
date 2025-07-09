@@ -64,7 +64,7 @@ use std::fmt::Debug;
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
 
-use super::base_tree::{BaseTreeRegressor, BaseTreeRegressorParameters, Splitter};
+use super::base_tree_regressor::{BaseTreeRegressor, BaseTreeRegressorParameters, Splitter};
 use crate::api::{Predictor, SupervisedEstimator};
 use crate::error::Failed;
 use crate::linalg::basic::arrays::{Array1, Array2};
