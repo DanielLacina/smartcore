@@ -312,37 +312,10 @@ impl<TX: Number + PartialOrd, TY: Number, X: Array2<TX>, Y: Array1<TY>>
         })
     }
 
-    pub(crate) fn fit_weak_learner(
-        x: &X,
-        y: &Y,
-        samples: Vec<usize>,
-        mtry: usize,
-        parameters: DecisionTreeRegressorParameters,
-    ) -> Result<DecisionTreeRegressor<TX, TY, X, Y>, Failed> {
-        let tree_parameters = BaseTreeRegressorParameters {
-            max_depth: parameters.max_depth,
-            min_samples_leaf: parameters.min_samples_leaf,
-            min_samples_split: parameters.min_samples_split,
-            seed: parameters.seed,
-            splitter: Splitter::Best,
-        };
-        let tree = BaseTreeRegressor::fit_weak_learner(x, y, samples, mtry, tree_parameters)?;
-        Ok(Self {
-            tree_regressor: Some(tree),
-        })
-    }
-
     /// Predict regression value for `x`.
     /// * `x` - _KxM_ data where _K_ is number of observations and _M_ is number of features.
     pub fn predict(&self, x: &X) -> Result<Y, Failed> {
         self.tree_regressor.as_ref().unwrap().predict(x)
-    }
-
-    pub(crate) fn predict_for_row(&self, x: &X, row: usize) -> TY {
-        self.tree_regressor
-            .as_ref()
-            .unwrap()
-            .predict_for_row(x, row)
     }
 }
 
