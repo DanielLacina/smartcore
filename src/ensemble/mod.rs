@@ -21,3 +21,4 @@ mod base_forest_regressor;
 pub mod random_forest_classifier;
 /// Random forest regressor
 pub mod random_forest_regressor;
+pub mod extra_trees_regressor;
