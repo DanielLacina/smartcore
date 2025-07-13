@@ -382,6 +382,20 @@ impl<T: Debug + Display + Copy + Sized> DenseMatrix<T> {
         };
         (start, end, stride)
     }
+
+    pub fn zeros_(nrows: usize, ncols: usize) -> Vec<f64> {
+        if let Some(vector) = MATRIX_POOL.with(|pool| {
+            pool.borrow_mut().acquire_vec::<f64>(nrows * ncols)
+        }) {
+            let mut vector = vector;
+            for _ in (0..nrows * ncols) {
+                vector.push(0.0);
+            }
+            return vector;
+        } else {
+            vec![0.0; nrows * ncols]
+        }
+    }
 }
 
 impl<T: Debug + Display + Copy + Sized> fmt::Display for DenseMatrix<T> {
